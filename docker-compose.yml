@@ -1,20 +1,24 @@
 services:
   postgres:
     image: postgres:16-alpine
+    profiles: [core, executors]
     environment:
       POSTGRES_DB: openkate
       POSTGRES_USER: openkate
       POSTGRES_PASSWORD: change-me
     ports: ["5432:5432"]
     volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U openkate"], interval: 3s, timeout: 3s, retries: 20}
 
   nats:
     image: nats:2.10-alpine
+    profiles: [core]
     command: ["-js"]
     ports: ["4222:4222"]
 
   minio:
     image: minio/minio:latest
+    profiles: [core]
     command: server /data --console-address :9001
     environment:
       MINIO_ROOT_USER: openkate
@@ -22,23 +26,42 @@ services:
     ports: ["9000:9000", "9001:9001"]
     volumes: ["minio_data:/data"]
 
+  minio-init:
+    image: minio/mc:latest
+    profiles: [core]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["until mc alias set openkate http://minio:9000 openkate change-me-now; do sleep 1; done; mc mb --ignore-existing openkate/openkate-artifacts"]
+    depends_on: [minio]
+
+  migrations:
+    image: postgres:16-alpine
+    profiles: [core, executors]
+    environment: {PGPASSWORD: change-me}
+    volumes: ["./migrations:/migrations:ro"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["for file in /migrations/*/*.sql; do psql postgresql://openkate@postgres:5432/openkate -v ON_ERROR_STOP=1 -f $$file; done"]
+    depends_on:
+      postgres: {condition: service_healthy}
+
   project-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/project-service}}
     environment:
       PYTHONPATH: /app/packages/python:/app/services/project-service
-      OPENKATE_PROJECT_DATABASE_URL: postgresql://openkate:change-me@postgres:5432/openkate
+      OPENKATE_PROJECT_DATABASE_URL: postgresql://project_runtime:change-me@postgres:5432/openkate
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
     ports: ["8001:8001"]
     depends_on: [postgres]
+    profiles: [core]
 
   project-outbox-publisher:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/project-service}}
     environment:
       PYTHONPATH: /app/packages/python:/app/services/project-service
-      OPENKATE_PROJECT_DATABASE_URL: postgresql://openkate:change-me@postgres:5432/openkate
+      OPENKATE_PROJECT_DATABASE_URL: postgresql://project_runtime:change-me@postgres:5432/openkate
       OPENKATE_NATS_URL: nats://nats:4222
     command: ["python", "-m", "app.publisher"]
     depends_on: [postgres, nats]
+    profiles: [core]
 
   gateway-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/gateway-service}}
@@ -49,33 +72,75 @@ services:
       OPENKATE_REPORT_SERVICE_URL: http://report-service:8003
       OPENKATE_EXECUTION_SERVICE_URL: http://execution-service:8004
       OPENKATE_WORKFLOW_SERVICE_URL: http://workflow-service:8005
+      OPENKATE_ASSET_SERVICE_URL: http://asset-service:8006
+      OPENKATE_AGENT_SERVICE_URL: http://agent-service:8007
+      OPENKATE_GOVERNANCE_SERVICE_URL: http://governance-service:8008
+      OPENKATE_CONNECTOR_SERVICE_URL: http://connector-service:8009
+      OPENKATE_EXECUTOR_UI_URL: http://executor-ui:8011
+      OPENKATE_EXECUTOR_API_URL: http://executor-api:8012
+      OPENKATE_EXECUTOR_STATE_URL: http://executor-state:8013
+      OPENKATE_JWT_SECRET: ${OPENKATE_JWT_SECRET:-local-development-secret-change-before-production}
+      OPENKATE_OIDC_ISSUER: ${OPENKATE_OIDC_ISSUER:-}
+      OPENKATE_OIDC_AUDIENCE: ${OPENKATE_OIDC_AUDIENCE:-}
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports: ["8000:8000"]
     depends_on: [project-service, validation-service, report-service, execution-service, workflow-service]
+    profiles: [core]
 
   validation-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/validation-service}}
     environment:
       PYTHONPATH: /app/packages/python:/app/services/validation-service
-      OPENKATE_VALIDATION_DATABASE_URL: postgresql://openkate:change-me@postgres:5432/openkate
+      OPENKATE_VALIDATION_DATABASE_URL: postgresql://validation_runtime:change-me@postgres:5432/openkate
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
     ports: ["8002:8002"]
     depends_on: [postgres]
+    profiles: [core]
 
   report-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/report-service}}
     environment:
       PYTHONPATH: /app/packages/python:/app/services/report-service
-      OPENKATE_REPORT_DATABASE_URL: postgresql://openkate:change-me@postgres:5432/openkate
+      OPENKATE_REPORT_DATABASE_URL: postgresql://report_runtime:change-me@postgres:5432/openkate
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003"]
     ports: ["8003:8003"]
     depends_on: [postgres]
+    profiles: [core]
+
+  asset-service:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/asset-service}}
+    profiles: [core]
+    environment: {PYTHONPATH: /app/packages/python:/app/services/asset-service}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8006"]
+    expose: ["8006"]
+
+  agent-service:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/agent-service}}
+    profiles: [ai]
+    environment: {PYTHONPATH: /app/packages/python:/app/services/agent-service}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8007"]
+    expose: ["8007"]
+
+  governance-service:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/governance-service}}
+    profiles: [core]
+    environment: {PYTHONPATH: /app/packages/python:/app/services/governance-service}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8008"]
+    expose: ["8008"]
+
+  connector-service:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/connector-service}}
+    profiles: [core]
+    environment: {PYTHONPATH: /app/packages/python:/app/services/connector-service}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8009"]
+    expose: ["8009"]
 
   execution-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/execution-service}}
     environment: {PYTHONPATH: /app/packages/python:/app/services/execution-service}
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8004"]
     expose: ["8004"]
+    profiles: [executors]
 
   workflow-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/workflow-service}}
@@ -88,6 +153,20 @@ services:
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8005"]
     expose: ["8005"]
     depends_on: [execution-service, executor-ui, executor-api, executor-state]
+    profiles: [executors]
+
+  temporal:
+    image: temporalio/auto-setup:1.25
+    profiles: [executors]
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: openkate
+      POSTGRES_PWD: change-me
+      POSTGRES_SEEDS: postgres
+    ports: ["7233:7233"]
+    depends_on:
+      postgres: {condition: service_healthy}
 
   executor-ui:
     build: {context: ., dockerfile: deploy/docker/playwright-worker.Dockerfile, args: {SERVICE_PATH: workers/executor-ui}}
@@ -97,12 +176,14 @@ services:
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8011"]
     expose: ["8011"]
     volumes: ["execution_artifacts:/artifacts"]
+    profiles: [executors]
 
   executor-api:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: workers/executor-api}}
     environment: {PYTHONPATH: /app/packages/python:/app/workers/executor-api}
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8012"]
     expose: ["8012"]
+    profiles: [executors]
 
   executor-state:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: workers/executor-state}}
@@ -111,6 +192,20 @@ services:
       OPENKATE_SECRET_STAGING_DB: ${OPENKATE_SECRET_STAGING_DB:-}
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8013"]
     expose: ["8013"]
+    profiles: [executors]
+
+  web:
+    build: {context: ., dockerfile: deploy/docker/web.Dockerfile}
+    profiles: [core]
+    ports: ["5173:80"]
+    depends_on: [gateway-service]
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.104.0
+    profiles: [observability]
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["./deploy/otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
+    ports: ["4317:4317", "4318:4318"]
 
 volumes:
   postgres_data:

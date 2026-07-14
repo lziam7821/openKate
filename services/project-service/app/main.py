@@ -5,8 +5,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.store import ProjectStore
+from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="project-service", version="0.1.0")
+instrument_app(app, "project-service", ["workspace", "project", "environment", "member", "audit"])
 
 Role = Literal["owner", "maintainer", "reviewer", "developer", "viewer"]
 

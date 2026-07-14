@@ -2,14 +2,31 @@ PYTHON := .venv/bin/python
 PIP := .venv/bin/pip
 PYTHONPATH := packages/python:services/project-service:services/validation-service:services/report-service:services/execution-service:services/workflow-service:services/gateway-service
 
-.PHONY: bootstrap test project validation report execution workflow gateway executor-ui executor-api executor-state health
+.PHONY: bootstrap test lint build up down project validation report execution workflow gateway executor-ui executor-api executor-state health
 
 bootstrap:
 	python3 -m venv .venv
 	$(PIP) install -r requirements-dev.txt
+	pnpm install
 
 test:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m pytest -q
+	pnpm --filter @openkate/web test
+	pnpm --filter @openkate/web build
+
+lint:
+	$(PYTHON) -m ruff check packages/python services workers tests
+	$(PYTHON) -m mypy packages/python
+	pnpm --filter @openkate/web lint
+
+build:
+	docker compose --profile core --profile ai --profile executors --profile observability build
+
+up:
+	docker compose --profile core --profile ai --profile executors --profile observability up --build
+
+down:
+	docker compose --profile core --profile ai --profile executors --profile observability down
 
 project:
 	PYTHONPATH=packages/python:services/project-service $(PYTHON) -m uvicorn app.main:app --app-dir services/project-service --port 8001 --reload

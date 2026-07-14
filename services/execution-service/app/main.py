@@ -6,8 +6,10 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
+from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="execution-service", version="0.3.0")
+instrument_app(app, "execution-service", ["plan", "run", "lease"])
 
 Channel = Literal["ui", "api", "state"]
 TEMPLATE_PATTERN = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*}}")

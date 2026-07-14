@@ -5,8 +5,10 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import FastAPI, HTTPException
 
 from openkate_executor import ExecutorRequest, ExecutorResult, evaluate_assertions, redact, render_templates
+from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-state", version="0.3.0")
+instrument_app(app, "executor-state", ["state.postgresql.read-only"])
 
 READ_ONLY_SQL = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
 

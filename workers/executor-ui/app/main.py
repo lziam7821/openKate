@@ -5,8 +5,10 @@ from typing import Any, Dict
 from fastapi import FastAPI, HTTPException
 
 from openkate_executor import ExecutorRequest, ExecutorResult, assert_allowed_url, redact, render_templates
+from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-ui", version="0.3.0")
+instrument_app(app, "executor-ui", ["ui.playwright"])
 
 
 async def execute_ui(request: ExecutorRequest) -> ExecutorResult:

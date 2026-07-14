@@ -1,12 +1,12 @@
 import asyncio
 import os
 from typing import Any, Dict, Optional
-from uuid import uuid4
-
 import httpx
 from fastapi import FastAPI, HTTPException, status
+from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="workflow-service", version="0.3.0")
+instrument_app(app, "workflow-service", ["workflow"])
 
 EXECUTION_SERVICE_URL = os.getenv("OPENKATE_EXECUTION_SERVICE_URL", "http://127.0.0.1:8004")
 EXECUTOR_URLS = {

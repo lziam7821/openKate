@@ -1,8 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, AuditLog, CurrentUser, Environment, Health, Member, Project, Workspace } from "./api";
 import { auth } from "./auth";
-
-const csv = (value: FormDataEntryValue | null) => String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+import { parseCommaList } from "./foundation-utils";
 
 export function FoundationApp() {
   const [user, setUser] = useState<CurrentUser | null>(null);
@@ -55,8 +54,8 @@ export function FoundationApp() {
   };
   const saveEnvironment = async (event: FormEvent<HTMLFormElement>, environment?: Environment) => {
     event.preventDefault(); if (!project) return; const form = new FormData(event.currentTarget);
-    const payload = { name: form.get("name"), base_url: form.get("baseUrl"), write_policy: form.get("writePolicy"), allowed_hosts: csv(form.get("allowedHosts")), account_refs: csv(form.get("accountRefs")), data_set_refs: csv(form.get("dataSetRefs")), secret_refs: {} };
-    try { environment ? await api.updateEnvironment(project.id, environment.id, payload) : await api.createEnvironment(project.id, payload); setEnvironments((await api.environments(project.id)).data); if (!environment) event.currentTarget.reset(); } catch (value) { fail(value); }
+    const payload = { name: form.get("name"), base_url: form.get("baseUrl"), write_policy: form.get("writePolicy"), allowed_hosts: parseCommaList(form.get("allowedHosts")), account_refs: parseCommaList(form.get("accountRefs")), data_set_refs: parseCommaList(form.get("dataSetRefs")), secret_refs: {} };
+    try { if (environment) await api.updateEnvironment(project.id, environment.id, payload); else await api.createEnvironment(project.id, payload); setEnvironments((await api.environments(project.id)).data); if (!environment) event.currentTarget.reset(); } catch (value) { fail(value); }
   };
   const addMember = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!project) return; const form = new FormData(event.currentTarget);

@@ -7,8 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="report-service", version="0.2.0")
+instrument_app(app, "report-service", ["read-model", "event-consumer"])
 
 ScenarioStatus = Literal["draft", "in_review", "approved", "rejected", "archived", "deprecated"]
 RiskLevel = Literal["low", "medium", "high", "critical"]

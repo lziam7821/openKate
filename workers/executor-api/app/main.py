@@ -4,8 +4,10 @@ import httpx
 from fastapi import FastAPI, HTTPException
 
 from openkate_executor import ExecutorRequest, ExecutorResult, assert_allowed_url, evaluate_assertions, redact, render_templates
+from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-api", version="0.3.0")
+instrument_app(app, "executor-api", ["api.http"])
 
 
 async def execute_api(request: ExecutorRequest, transport: Optional[httpx.AsyncBaseTransport] = None) -> ExecutorResult:
