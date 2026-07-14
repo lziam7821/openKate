@@ -82,3 +82,41 @@ def test_gateway_uses_verified_identity_for_public_project_routes(monkeypatch) -
     assert client.post("/api/v1/projects/project_1/members", headers=spoofed, json={"user_id": "user-9", "role": "viewer"}).status_code == 201
     assert client.patch("/api/v1/projects/project_1/members/user-9", headers=spoofed, json={"role": "developer"}).status_code == 200
     assert all(call[2]["id"] == "user-42" and call[2]["role"] == "owner" for call in calls)
+
+
+def test_failed_workflow_start_cancels_run_and_releases_lease(monkeypatch) -> None:
+    configure_auth(monkeypatch)
+    calls: list[tuple[str, str]] = []
+
+    async def fake_upstream(url, method, path, request, payload=None, extra_headers=None):
+        calls.append((method, path))
+        if url == gateway_service.VALIDATION_SERVICE_URL:
+            return httpx.Response(200, json={"id": "scenario-1", "projectId": "project-1", "version": 1, "status": "approved"})
+        if url == gateway_service.PROJECT_SERVICE_URL:
+            return httpx.Response(200, json={"id": "env-1", "allowed_hosts": [], "account_refs": [], "data_set_refs": []})
+        if path.endswith("/cancel"):
+            return httpx.Response(200, json={"id": "run-1", "status": "canceled"})
+        return httpx.Response(202, json={"id": "run-1", "status": "running"})
+
+    class FailedWorkflowClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url):
+            return httpx.Response(503, json={"detail": "workflow unavailable"})
+
+    monkeypatch.setattr(gateway_service, "upstream", fake_upstream)
+    monkeypatch.setattr(gateway_service.httpx, "AsyncClient", FailedWorkflowClient)
+    response = client.post(
+        "/api/v1/scenarios/scenario-1/runs",
+        headers=auth_headers(),
+        json={"planId": "plan-1", "environmentId": "env-1"},
+    )
+    assert response.status_code == 503
+    assert ("POST", "/internal/v1/runs/run-1/cancel") in calls

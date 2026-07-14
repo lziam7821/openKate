@@ -149,6 +149,13 @@ async def execution_upstream(method: str, path: str, request: Request, payload: 
     return proxy_error(response) if response.is_error else proxy_success(response)
 
 
+async def release_failed_workflow_run(run_id: str, request: Request) -> None:
+    try:
+        await upstream(EXECUTION_SERVICE_URL, "POST", f"/internal/v1/runs/{run_id}/cancel", request)
+    except httpx.HTTPError:
+        pass
+
+
 @app.get("/health", tags=["system"])
 async def health() -> Dict[str, str]:
     return {"service": "gateway-service", "status": "ready"}
@@ -362,8 +369,10 @@ async def create_execution_run(scenario_id: str, request: Request) -> JSONRespon
         async with httpx.AsyncClient(timeout=3.0) as client:
             workflow_response = await client.post(f"{WORKFLOW_SERVICE_URL}/internal/v1/runs/{run_id}/execute")
         if workflow_response.is_error:
+            await release_failed_workflow_run(run_id, request)
             return proxy_error(workflow_response)
     except httpx.HTTPError:
+        await release_failed_workflow_run(run_id, request)
         return JSONResponse(status_code=503, content={"error": {"code": "WORKFLOW_SERVICE_UNAVAILABLE", "message": "workflow service unavailable", "requestId": str(uuid4()), "details": {"runId": run_id}}})
     return run_response
 
@@ -395,7 +404,11 @@ async def retry_execution_run(run_id: str, request: Request) -> JSONResponse:
     retried_id = json.loads(retried.body)["id"]
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post(f"{WORKFLOW_SERVICE_URL}/internal/v1/runs/{retried_id}/execute")
+            workflow_response = await client.post(f"{WORKFLOW_SERVICE_URL}/internal/v1/runs/{retried_id}/execute")
+        if workflow_response.is_error:
+            await release_failed_workflow_run(retried_id, request)
+            return proxy_error(workflow_response)
     except httpx.HTTPError:
+        await release_failed_workflow_run(retried_id, request)
         return JSONResponse(status_code=503, content={"error": {"code": "WORKFLOW_SERVICE_UNAVAILABLE", "message": "workflow service unavailable", "requestId": str(uuid4()), "details": {"runId": retried_id}}})
     return retried
