@@ -128,6 +128,16 @@ services:
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8008"]
     expose: ["8008"]
 
+  project-event-consumer:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/governance-service}}
+    profiles: [core]
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/governance-service
+      OPENKATE_GOVERNANCE_DATABASE_URL: postgresql://governance_runtime:change-me@postgres:5432/openkate
+      OPENKATE_NATS_URL: nats://nats:4222
+    command: ["python", "-m", "app.consumer"]
+    depends_on: [postgres, nats]
+
   connector-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/connector-service}}
     profiles: [core]
