@@ -31,6 +31,15 @@ services:
     ports: ["8001:8001"]
     depends_on: [postgres]
 
+  project-outbox-publisher:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/project-service}}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/project-service
+      OPENKATE_PROJECT_DATABASE_URL: postgresql://openkate:change-me@postgres:5432/openkate
+      OPENKATE_NATS_URL: nats://nats:4222
+    command: ["python", "-m", "app.publisher"]
+    depends_on: [postgres, nats]
+
   gateway-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/gateway-service}}
     environment:

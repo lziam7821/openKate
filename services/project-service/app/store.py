@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 
 class ProjectStore:
@@ -14,6 +15,7 @@ class ProjectStore:
         self.environments: Dict[str, List[Dict[str, Any]]] = {}
         self.members: Dict[str, List[Dict[str, str]]] = {}
         self.audit_logs: Dict[str, List[Dict[str, str]]] = {}
+        self.outbox_events: List[Dict[str, Any]] = []
         if database_url is None:
             now = self.now()
             self.workspaces["workspace_demo"] = {"id": "workspace_demo", "name": "OpenKATE Demo"}
@@ -31,6 +33,15 @@ class ProjectStore:
     @staticmethod
     def now() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def _memory_event(self, event_type: str, project_id: str, payload: Dict[str, Any]) -> None:
+        self.outbox_events.append({"eventId": str(uuid4()), "eventType": event_type, "projectId": project_id, "occurredAt": self.now(), "payload": payload, "publishedAt": None})
+
+    def _insert_event(self, connection: Any, event_type: str, project_id: str, payload: Dict[str, Any]) -> None:
+        connection.execute(
+            "INSERT INTO project_schema.outbox_events (id, event_type, project_id, payload) VALUES (%s, %s, %s, %s)",
+            (str(uuid4()), event_type, project_id, Jsonb(payload)),
+        )
 
     @staticmethod
     def project(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -93,6 +104,7 @@ class ProjectStore:
             self.projects[project_id] = project
             self.members[project_id] = [{"userId": actor, "role": role}]
             self.audit(project_id, actor, "project.created")
+            self._memory_event("project.created.v1", project_id, {"name": name, "workspaceId": workspace_id})
             return project
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             exists = connection.execute("SELECT 1 FROM project_schema.workspaces WHERE id = %s", (workspace_id,)).fetchone()
@@ -104,6 +116,7 @@ class ProjectStore:
             ).fetchone()
             connection.execute("INSERT INTO project_schema.project_members (project_id, user_id, role) VALUES (%s, %s, %s)", (project_id, actor, role))
             self._insert_audit(connection, project_id, actor, "project.created")
+            self._insert_event(connection, "project.created.v1", project_id, {"name": name, "workspaceId": workspace_id})
         return self.project(dict(row))
 
     def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
@@ -124,6 +137,7 @@ class ProjectStore:
             project.update(updates)
             project["updatedAt"] = self.now()
             self.audit(project_id, actor, "project.updated")
+            self._memory_event("project.updated.v1", project_id, {"name": project["name"], "description": project["description"]})
             return project
         current = self.get_project(project_id)
         if current is None:
@@ -136,6 +150,7 @@ class ProjectStore:
                 (name, description, project_id),
             ).fetchone()
             self._insert_audit(connection, project_id, actor, "project.updated")
+            self._insert_event(connection, "project.updated.v1", project_id, {"name": name, "description": description})
         return self.project(dict(row))
 
     def archive_project(self, project_id: str, actor: str) -> Optional[Dict[str, Any]]:
@@ -146,6 +161,7 @@ class ProjectStore:
             project["archivedAt"] = self.now()
             project["updatedAt"] = project["archivedAt"]
             self.audit(project_id, actor, "project.archived")
+            self._memory_event("project.updated.v1", project_id, {"archivedAt": project["archivedAt"]})
             return project
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             row = connection.execute(
@@ -154,6 +170,7 @@ class ProjectStore:
             ).fetchone()
             if row:
                 self._insert_audit(connection, project_id, actor, "project.archived")
+                self._insert_event(connection, "project.updated.v1", project_id, {"archivedAt": row["archived_at"].isoformat()})
         return self.project(dict(row)) if row else None
 
     def create_environment(self, project_id: str, payload: Dict[str, Any], actor: str) -> Optional[Dict[str, Any]]:
@@ -163,6 +180,7 @@ class ProjectStore:
         if self.database_url is None:
             self.environments.setdefault(project_id, []).append(environment)
             self.audit(project_id, actor, "environment.created")
+            self._memory_event("project.environment.created.v1", project_id, {"environmentId": environment["id"], "name": environment["name"], "baseUrl": environment["base_url"], "writePolicy": environment["write_policy"]})
             return environment
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             row = connection.execute(
@@ -170,6 +188,7 @@ class ProjectStore:
                 (environment["id"], project_id, payload["name"], payload["base_url"], payload["write_policy"], payload["allowed_hosts"], payload["account_refs"], payload["data_set_refs"], psycopg.types.json.Jsonb(payload["secret_refs"])),
             ).fetchone()
             self._insert_audit(connection, project_id, actor, "environment.created")
+            self._insert_event(connection, "project.environment.created.v1", project_id, {"environmentId": environment["id"], "name": environment["name"], "baseUrl": environment["base_url"], "writePolicy": environment["write_policy"]})
         return self.environment(dict(row))
 
     def list_environments(self, project_id: str) -> Optional[List[Dict[str, Any]]]:
@@ -198,6 +217,8 @@ class ProjectStore:
         if self.database_url is None:
             current.update(updates)
             self.audit(project_id, actor, "environment.updated")
+            if "write_policy" in updates:
+                self._memory_event("project.policy.changed.v1", project_id, {"environmentId": environment_id, "writePolicy": current["write_policy"]})
             return current
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             row = connection.execute(
@@ -206,6 +227,8 @@ class ProjectStore:
             ).fetchone()
             if row:
                 self._insert_audit(connection, project_id, actor, "environment.updated")
+                if "write_policy" in updates:
+                    self._insert_event(connection, "project.policy.changed.v1", project_id, {"environmentId": environment_id, "writePolicy": updated["write_policy"]})
         return self.environment(dict(row)) if row else None
 
     def member_role(self, project_id: str, user_id: str) -> Optional[str]:
@@ -232,10 +255,12 @@ class ProjectStore:
         if self.database_url is None:
             self.members.setdefault(project_id, []).append(member)
             self.audit(project_id, actor, "member.created")
+            self._memory_event("project.member.changed.v1", project_id, {"userId": user_id, "role": role, "change": "added"})
             return member
         with psycopg.connect(self.database_url) as connection:
             connection.execute("INSERT INTO project_schema.project_members (project_id, user_id, role) VALUES (%s, %s, %s)", (project_id, user_id, role))
             self._insert_audit(connection, project_id, actor, "member.created")
+            self._insert_event(connection, "project.member.changed.v1", project_id, {"userId": user_id, "role": role, "change": "added"})
         return member
 
     def update_member(self, project_id: str, user_id: str, role: str, actor: str) -> Optional[Dict[str, str]]:
@@ -244,6 +269,7 @@ class ProjectStore:
                 if member["userId"] == user_id:
                     member["role"] = role
                     self.audit(project_id, actor, "member.updated")
+                    self._memory_event("project.member.changed.v1", project_id, {"userId": user_id, "role": role, "change": "updated"})
                     return member
             return None
         with psycopg.connect(self.database_url) as connection:
@@ -251,6 +277,7 @@ class ProjectStore:
             if result.rowcount == 0:
                 return None
             self._insert_audit(connection, project_id, actor, "member.updated")
+            self._insert_event(connection, "project.member.changed.v1", project_id, {"userId": user_id, "role": role, "change": "updated"})
         return {"userId": user_id, "role": role}
 
     def delete_member(self, project_id: str, user_id: str, actor: str) -> bool:
@@ -261,12 +288,29 @@ class ProjectStore:
                 return False
             self.members[project_id] = remaining
             self.audit(project_id, actor, "member.removed")
+            self._memory_event("project.member.changed.v1", project_id, {"userId": user_id, "change": "removed"})
             return True
         with psycopg.connect(self.database_url) as connection:
             result = connection.execute("DELETE FROM project_schema.project_members WHERE project_id = %s AND user_id = %s", (project_id, user_id))
             if result.rowcount:
                 self._insert_audit(connection, project_id, actor, "member.removed")
+                self._insert_event(connection, "project.member.changed.v1", project_id, {"userId": user_id, "change": "removed"})
         return result.rowcount == 1
+
+    def pending_events(self, limit: int = 100) -> List[Dict[str, Any]]:
+        if self.database_url is None:
+            return [event for event in self.outbox_events if event["publishedAt"] is None][:limit]
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute("SELECT id, event_type, project_id, payload, occurred_at FROM project_schema.outbox_events WHERE published_at IS NULL ORDER BY occurred_at LIMIT %s", (limit,)).fetchall()
+        return [{"eventId": row["id"], "eventType": row["event_type"], "projectId": row["project_id"], "occurredAt": row["occurred_at"].isoformat(), "payload": row["payload"]} for row in rows]
+
+    def mark_published(self, event_id: str) -> None:
+        if self.database_url is None:
+            event = next(item for item in self.outbox_events if item["eventId"] == event_id)
+            event["publishedAt"] = self.now()
+            return
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute("UPDATE project_schema.outbox_events SET published_at = NOW() WHERE id = %s", (event_id,))
 
     def audit(self, project_id: str, actor: str, action: str) -> None:
         self.audit_logs.setdefault(project_id, []).append({"id": str(uuid4()), "actor": actor, "action": action, "occurredAt": self.now()})
