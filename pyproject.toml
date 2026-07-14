@@ -1,10 +1,9 @@
 [project]
 name = "openkate"
-version = "0.1.0"
+version = "0.2.0"
 description = "OpenKATE intelligent business validation platform"
 requires-python = ">=3.9"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["packages/python", "services/project-service", "services/gateway-service"]
-
