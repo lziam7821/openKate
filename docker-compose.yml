@@ -46,9 +46,12 @@ services:
 
   validation-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/validation-service}}
-    environment: {PYTHONPATH: /app/packages/python:/app/services/validation-service}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/validation-service
+      OPENKATE_VALIDATION_DATABASE_URL: postgresql://openkate:change-me@postgres:5432/openkate
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
     ports: ["8002:8002"]
+    depends_on: [postgres]
 
   report-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/report-service}}

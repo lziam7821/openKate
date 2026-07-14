@@ -1,3 +1,4 @@
+import os
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -5,6 +6,9 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 app = FastAPI(title="validation-service", version="0.2.0")
 
@@ -74,7 +78,8 @@ class RejectRequest(ApiModel):
 
 
 class ValidationStore:
-    def __init__(self) -> None:
+    def __init__(self, database_url: Optional[str] = None) -> None:
+        self.database_url = database_url
         self.scenarios: Dict[str, Dict[str, Any]] = {}
         self.events: List[Dict[str, Any]] = []
 
@@ -116,8 +121,66 @@ class ValidationStore:
         scenario["versions"][-1]["status"] = scenario["status"]
         scenario["versions"][-1]["updatedAt"] = scenario["updatedAt"]
 
+    def get(self, scenario_id: str) -> Optional[Dict[str, Any]]:
+        if self.database_url is None:
+            return self.scenarios.get(scenario_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute(
+                "SELECT aggregate FROM validation_schema.validation_scenarios WHERE id = %s",
+                (scenario_id,),
+            ).fetchone()
+        return deepcopy(row["aggregate"]) if row else None
 
-store = ValidationStore()
+    def for_project(self, project_id: str) -> List[Dict[str, Any]]:
+        if self.database_url is None:
+            return [item for item in self.scenarios.values() if item["projectId"] == project_id]
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                "SELECT aggregate FROM validation_schema.validation_scenarios WHERE project_id = %s",
+                (project_id,),
+            ).fetchall()
+        return [deepcopy(row["aggregate"]) for row in rows]
+
+    def save(self, scenario: Dict[str, Any], previous_revision: Optional[int] = None) -> None:
+        if self.database_url is None:
+            self.scenarios[scenario["id"]] = scenario
+            return
+        values = (
+            scenario["projectId"], scenario["title"], scenario["status"], scenario["riskLevel"],
+            scenario["owner"], scenario["version"], scenario["revision"], scenario["updatedBy"],
+            scenario["updatedAt"], Jsonb(scenario), scenario["id"],
+        )
+        with psycopg.connect(self.database_url) as connection:
+            if previous_revision is None:
+                connection.execute(
+                    "INSERT INTO validation_schema.validation_scenarios (id, project_id, title, status, risk_level, owner, current_version, revision, created_by, created_at, updated_by, updated_at, aggregate) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (scenario["id"], scenario["projectId"], scenario["title"], scenario["status"], scenario["riskLevel"], scenario["owner"], scenario["version"], scenario["revision"], scenario["createdBy"], scenario["createdAt"], scenario["updatedBy"], scenario["updatedAt"], Jsonb(scenario)),
+                )
+            else:
+                result = connection.execute(
+                    "UPDATE validation_schema.validation_scenarios SET project_id = %s, title = %s, status = %s, risk_level = %s, owner = %s, current_version = %s, revision = %s, updated_by = %s, updated_at = %s, aggregate = %s WHERE id = %s AND revision = %s",
+                    (*values, previous_revision),
+                )
+                if result.rowcount != 1:
+                    raise HTTPException(status_code=409, detail={"code": "SCENARIO_VERSION_CONFLICT", "message": "scenario has been updated by another user"})
+            for version in scenario["versions"]:
+                connection.execute(
+                    "INSERT INTO validation_schema.scenario_versions (scenario_id, version, content, created_by, created_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (scenario_id, version) DO UPDATE SET content = EXCLUDED.content",
+                    (scenario["id"], version["version"], Jsonb(version), version["updatedBy"], version["updatedAt"]),
+                )
+
+    def ready(self) -> bool:
+        if self.database_url is None:
+            return True
+        try:
+            with psycopg.connect(self.database_url) as connection:
+                connection.execute("SELECT 1 FROM validation_schema.validation_scenarios LIMIT 1")
+            return True
+        except psycopg.Error:
+            return False
+
+
+store = ValidationStore(os.getenv("OPENKATE_VALIDATION_DATABASE_URL"))
 
 
 def actor_role(x_openkate_role: str = Header(default="viewer")) -> Role:
@@ -140,7 +203,7 @@ def require_role(*allowed: Role):
 
 
 def get_scenario(scenario_id: str) -> Dict[str, Any]:
-    scenario = store.scenarios.get(scenario_id)
+    scenario = store.get(scenario_id)
     if scenario is None:
         raise HTTPException(status_code=404, detail="scenario not found")
     return scenario
@@ -175,7 +238,7 @@ def response_with_etag(response: Response, scenario: Dict[str, Any]) -> Dict[str
 
 @app.get("/health", tags=["system"])
 async def health() -> Dict[str, str]:
-    return {"service": "validation-service", "status": "ready"}
+    return {"service": "validation-service", "status": "ready" if store.ready() else "degraded"}
 
 
 @app.post("/internal/v1/projects/{project_id}/scenarios", status_code=status.HTTP_201_CREATED)
@@ -205,7 +268,7 @@ async def create_scenario(
     scenario["owner"] = scenario["owner"] or actor
     store.audit(scenario, actor, "scenario.created")
     store.snapshot(scenario)
-    store.scenarios[scenario["id"]] = scenario
+    store.save(scenario)
     store.event("validation.scenario.created.v1", scenario)
     return response_with_etag(response, scenario)
 
@@ -221,7 +284,7 @@ async def list_scenarios(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> Dict[str, Any]:
-    items = [item for item in store.scenarios.values() if item["projectId"] == project_id]
+    items = store.for_project(project_id)
     if q:
         query = q.lower()
         items = [item for item in items if query in item["title"].lower() or query in item["businessGoal"].lower()]
@@ -254,6 +317,7 @@ async def update_scenario(
 ) -> Dict[str, Any]:
     scenario = get_scenario(scenario_id)
     require_match(scenario, if_match)
+    previous_revision = scenario["revision"]
     if scenario["status"] == "in_review":
         raise HTTPException(status_code=409, detail="scenario in review cannot be edited")
     if scenario["status"] in {"archived", "deprecated"}:
@@ -262,6 +326,7 @@ async def update_scenario(
     scenario["version"] += 1
     scenario["status"] = "draft"
     touch(scenario, actor, "scenario.versioned", snapshot=True)
+    store.save(scenario, previous_revision)
     store.event("validation.scenario.versioned.v1", scenario)
     return response_with_etag(response, scenario)
 
@@ -276,10 +341,12 @@ async def submit_review(
 ) -> Dict[str, Any]:
     scenario = get_scenario(scenario_id)
     require_match(scenario, if_match)
+    previous_revision = scenario["revision"]
     if scenario["status"] != "draft":
         raise HTTPException(status_code=409, detail="only draft scenarios can be submitted for review")
     scenario["status"] = "in_review"
     touch(scenario, actor, "scenario.review.requested")
+    store.save(scenario, previous_revision)
     store.event("validation.scenario.review.requested.v1", scenario)
     return response_with_etag(response, scenario)
 
@@ -295,11 +362,13 @@ async def create_review(
 ) -> Dict[str, Any]:
     scenario = get_scenario(scenario_id)
     require_match(scenario, if_match)
+    previous_revision = scenario["revision"]
     if scenario["status"] != "in_review":
         raise HTTPException(status_code=409, detail="reviews require a scenario in review")
     review = {"id": f"review_{uuid4().hex[:12]}", "author": actor, "content": payload.content, "status": payload.status, "createdAt": store.now()}
     scenario["reviews"].append(review)
     touch(scenario, actor, "scenario.review.created")
+    store.save(scenario, previous_revision)
     return response_with_etag(response, scenario)
 
 
@@ -313,10 +382,12 @@ async def approve_scenario(
 ) -> Dict[str, Any]:
     scenario = get_scenario(scenario_id)
     require_match(scenario, if_match)
+    previous_revision = scenario["revision"]
     if scenario["status"] != "in_review":
         raise HTTPException(status_code=409, detail="only scenarios in review can be approved")
     scenario["status"] = "approved"
     touch(scenario, actor, "scenario.approved")
+    store.save(scenario, previous_revision)
     store.event("validation.scenario.approved.v1", scenario)
     return response_with_etag(response, scenario)
 
@@ -332,11 +403,13 @@ async def reject_scenario(
 ) -> Dict[str, Any]:
     scenario = get_scenario(scenario_id)
     require_match(scenario, if_match)
+    previous_revision = scenario["revision"]
     if scenario["status"] != "in_review":
         raise HTTPException(status_code=409, detail="only scenarios in review can be rejected")
     scenario["status"] = "rejected"
     scenario["reviews"].append({"id": f"review_{uuid4().hex[:12]}", "author": actor, "content": payload.reason, "status": "open", "createdAt": store.now()})
     touch(scenario, actor, "scenario.rejected")
+    store.save(scenario, previous_revision)
     store.event("validation.scenario.rejected.v1", scenario)
     return response_with_etag(response, scenario)
 
@@ -351,10 +424,12 @@ async def archive_scenario(
 ) -> Dict[str, Any]:
     scenario = get_scenario(scenario_id)
     require_match(scenario, if_match)
+    previous_revision = scenario["revision"]
     if scenario["status"] != "approved":
         raise HTTPException(status_code=409, detail="only approved scenarios can be archived")
     scenario["status"] = "archived"
     touch(scenario, actor, "scenario.archived")
+    store.save(scenario, previous_revision)
     store.event("validation.scenario.archived.v1", scenario)
     return response_with_etag(response, scenario)
 
