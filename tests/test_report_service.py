@@ -42,3 +42,7 @@ def test_read_model_is_idempotent_and_filters_project_scenarios() -> None:
     assert response.status_code == 200
     assert response.json()["total"] == 1
     assert response.json()["items"][0]["id"] == "scenario_checkout"
+
+    rebuilt = client.post("/internal/v1/read-model/rebuild", json=[event])
+    assert rebuilt.json() == {"consumed": 1}
+    assert client.get("/internal/v1/projects/project_checkout/scenarios").json()["total"] == 1
