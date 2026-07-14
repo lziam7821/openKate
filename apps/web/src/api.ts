@@ -1,4 +1,5 @@
 const baseUrl = import.meta.env.VITE_GATEWAY_URL || "http://127.0.0.1:8000";
+const accessToken = import.meta.env.VITE_ACCESS_TOKEN;
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 export type ScenarioStatus = "draft" | "in_review" | "approved" | "rejected" | "archived" | "deprecated";
@@ -19,7 +20,7 @@ export type RunEvents = { events: { eventId: string; eventType: string; occurred
 type ApiResult<T> = { data: T; etag?: string; degraded: boolean };
 
 async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
-  const response = await fetch(`${baseUrl}${path}`, { ...init, headers: { "Content-Type": "application/json", "X-OpenKATE-Role": "owner", "X-OpenKATE-Actor": "web-owner", ...(init?.headers || {}) } });
+  const response = await fetch(`${baseUrl}${path}`, { ...init, headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}), ...(init?.headers || {}) } });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error?.message || body.detail || "Request failed");
   return { data: body as T, etag: response.headers.get("etag") || undefined, degraded: response.headers.get("x-openkate-read-model") === "degraded" };

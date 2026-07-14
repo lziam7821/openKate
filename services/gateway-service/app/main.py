@@ -5,7 +5,8 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, Header, Request
+import jwt
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -24,8 +25,57 @@ app.add_middleware(
 )
 
 
+def error_response(status_code: int, code: str, message: str, request_id: str) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"error": {"code": code, "message": message, "requestId": request_id, "details": {}}})
+
+
+def decode_access_token(token: str) -> Dict[str, Any]:
+    issuer = os.getenv("OPENKATE_OIDC_ISSUER")
+    audience = os.getenv("OPENKATE_OIDC_AUDIENCE")
+    options = {"verify_iss": bool(issuer), "verify_aud": bool(audience)}
+    decode_args = {"issuer": issuer, "audience": audience, "options": options}
+    jwks_url = os.getenv("OPENKATE_OIDC_JWKS_URL")
+    if jwks_url:
+        signing_key = jwt.PyJWKClient(jwks_url).get_signing_key_from_jwt(token).key
+        algorithms = [item.strip() for item in os.getenv("OPENKATE_JWT_ALGORITHMS", "RS256").split(",") if item.strip()]
+        return jwt.decode(token, signing_key, algorithms=algorithms, **decode_args)
+    secret = os.getenv("OPENKATE_JWT_SECRET")
+    if not secret:
+        raise RuntimeError("JWT validation is not configured")
+    return jwt.decode(token, secret, algorithms=["HS256"], **decode_args)
+
+
+@app.middleware("http")
+async def authenticate(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    request.state.request_id = request_id
+    if request.url.path.startswith("/api/v1") and request.method != "OPTIONS":
+        authorization = request.headers.get("Authorization", "")
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            return error_response(401, "AUTHENTICATION_REQUIRED", "bearer token is required", request_id)
+        try:
+            claims = decode_access_token(token)
+        except RuntimeError as error:
+            return error_response(503, "AUTH_NOT_CONFIGURED", str(error), request_id)
+        except jwt.PyJWTError:
+            return error_response(401, "INVALID_ACCESS_TOKEN", "access token is invalid", request_id)
+        subject = claims.get("sub")
+        roles = claims.get("roles", [])
+        if not isinstance(roles, list):
+            roles = []
+        role = claims.get("role") or (roles[0] if isinstance(roles, list) and roles else None)
+        if not isinstance(subject, str) or not subject or role not in {"owner", "maintainer", "reviewer", "developer", "viewer"}:
+            return error_response(403, "INVALID_IDENTITY", "access token has no supported subject and role", request_id)
+        request.state.identity = {"id": subject, "name": claims.get("name", subject), "email": claims.get("email"), "role": role, "roles": roles or [role]}
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
 async def upstream(url: str, method: str, path: str, request: Request, payload: Any = None, extra_headers: Optional[Dict[str, str]] = None) -> httpx.Response:
-    headers = {"X-OpenKATE-Role": request.headers.get("X-OpenKATE-Role", "viewer"), "X-OpenKATE-Actor": request.headers.get("X-OpenKATE-Actor", "local-user")}
+    identity = request.state.identity
+    headers = {"X-OpenKATE-Role": identity["role"], "X-OpenKATE-Actor": identity["id"], "X-Request-ID": request.state.request_id}
     if if_match := request.headers.get("If-Match"):
         headers["If-Match"] = if_match
     if idempotency_key := request.headers.get("Idempotency-Key"):
@@ -117,9 +167,19 @@ async def system_health() -> Dict[str, Any]:
     return {"status": "ready" if all(item["status"] == "ready" for item in services) else "degraded", "services": services}
 
 
+@app.get("/api/v1/me")
+async def current_user(request: Request) -> Dict[str, Any]:
+    return request.state.identity
+
+
 @app.get("/api/v1/workspaces")
 async def list_workspaces(request: Request) -> JSONResponse:
     return await project_request("GET", "/internal/v1/workspaces", request)
+
+
+@app.post("/api/v1/workspaces", status_code=201)
+async def create_workspace(request: Request) -> JSONResponse:
+    return await project_request("POST", "/internal/v1/workspaces", request, await request.json())
 
 
 @app.get("/api/v1/workspaces/{workspace_id}/projects")
@@ -130,6 +190,16 @@ async def list_projects(workspace_id: str, request: Request) -> JSONResponse:
 @app.post("/api/v1/workspaces/{workspace_id}/projects", status_code=201)
 async def create_project(workspace_id: str, request: Request) -> JSONResponse:
     return await project_request("POST", f"/internal/v1/workspaces/{workspace_id}/projects", request, await request.json())
+
+
+@app.get("/api/v1/projects/{project_id}")
+async def project_detail(project_id: str, request: Request) -> JSONResponse:
+    return await project_request("GET", f"/internal/v1/projects/{project_id}", request)
+
+
+@app.patch("/api/v1/projects/{project_id}")
+async def update_project(project_id: str, request: Request) -> JSONResponse:
+    return await project_request("PATCH", f"/internal/v1/projects/{project_id}", request, await request.json())
 
 
 @app.post("/api/v1/projects/{project_id}/environments", status_code=201)
@@ -145,6 +215,16 @@ async def list_environments(project_id: str, request: Request) -> JSONResponse:
 @app.get("/api/v1/projects/{project_id}/members")
 async def list_members(project_id: str, request: Request) -> JSONResponse:
     return await project_request("GET", f"/internal/v1/projects/{project_id}/members", request)
+
+
+@app.post("/api/v1/projects/{project_id}/members", status_code=201)
+async def create_member(project_id: str, request: Request) -> JSONResponse:
+    return await project_request("POST", f"/internal/v1/projects/{project_id}/members", request, await request.json())
+
+
+@app.patch("/api/v1/projects/{project_id}/members/{member_id}")
+async def update_member(project_id: str, member_id: str, request: Request) -> JSONResponse:
+    return await project_request("PATCH", f"/internal/v1/projects/{project_id}/members/{member_id}", request, await request.json())
 
 
 @app.get("/api/v1/projects/{project_id}/audit-logs")

@@ -50,3 +50,17 @@ def test_environment_exposes_only_connection_and_resource_references() -> None:
     listed = client.get(f"/internal/v1/projects/{project['id']}/environments").json()
     assert listed[0]["allowed_hosts"] == ["shop.test", "payments.test"]
     assert "password" not in str(listed).lower()
+
+
+def test_owner_can_create_workspace_and_manage_project_members_with_actor_audit() -> None:
+    headers = {"X-OpenKATE-Role": "owner", "X-OpenKATE-Actor": "owner-ada"}
+    workspace = client.post("/internal/v1/workspaces", headers=headers, json={"name": "Payments"})
+    assert workspace.status_code == 201
+    project = client.post(f"/internal/v1/workspaces/{workspace.json()['id']}/projects", headers=headers, json={"name": "Checkout"})
+    project_id = project.json()["id"]
+    member = client.post(f"/internal/v1/projects/{project_id}/members", headers=headers, json={"user_id": "reviewer-lin", "role": "reviewer"})
+    assert member.status_code == 201
+    updated = client.patch(f"/internal/v1/projects/{project_id}/members/reviewer-lin", headers=headers, json={"role": "developer"})
+    assert updated.json()["role"] == "developer"
+    audit = client.get(f"/internal/v1/projects/{project_id}/audit-logs").json()
+    assert {item["actor"] for item in audit} == {"owner-ada"}

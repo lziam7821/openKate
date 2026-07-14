@@ -15,6 +15,10 @@ class ProjectCreate(BaseModel):
     description: str = Field(default="", max_length=500)
 
 
+class WorkspaceCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+
+
 class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=100)
     description: Optional[str] = Field(default=None, max_length=500)
@@ -71,6 +75,10 @@ def actor_role(x_openkate_role: str = Header(default="viewer")) -> Role:
     return x_openkate_role  # type: ignore[return-value]
 
 
+def actor_name(x_openkate_actor: str = Header(default="local-user")) -> str:
+    return x_openkate_actor
+
+
 def require_write(role: Role = Depends(actor_role)) -> Role:
     if role not in {"owner", "maintainer"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="write permission required")
@@ -87,13 +95,20 @@ async def list_workspaces() -> List[Dict[str, str]]:
     return list(store.workspaces.values())
 
 
+@app.post("/internal/v1/workspaces", status_code=status.HTTP_201_CREATED)
+async def create_workspace(payload: WorkspaceCreate, role: Role = Depends(require_write)) -> Dict[str, str]:
+    workspace = {"id": f"workspace_{uuid4().hex[:12]}", "name": payload.name}
+    store.workspaces[workspace["id"]] = workspace
+    return workspace
+
+
 @app.get("/internal/v1/workspaces/{workspace_id}/projects")
 async def list_projects(workspace_id: str) -> List[Dict[str, object]]:
     return [item for item in store.projects.values() if item["workspaceId"] == workspace_id]
 
 
 @app.post("/internal/v1/workspaces/{workspace_id}/projects", status_code=status.HTTP_201_CREATED)
-async def create_project(workspace_id: str, payload: ProjectCreate, role: Role = Depends(require_write)) -> Dict[str, object]:
+async def create_project(workspace_id: str, payload: ProjectCreate, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, object]:
     if workspace_id not in store.workspaces:
         raise HTTPException(status_code=404, detail="workspace not found")
     project_id = f"project_{uuid4().hex[:12]}"
@@ -106,8 +121,8 @@ async def create_project(workspace_id: str, payload: ProjectCreate, role: Role =
         "updatedAt": store.now(),
     }
     store.projects[project_id] = project
-    store.members[project_id] = [{"userId": "local-owner", "role": role}]
-    store.audit(project_id, "local-owner", "project.created")
+    store.members[project_id] = [{"userId": actor, "role": role}]
+    store.audit(project_id, actor, "project.created")
     return project
 
 
@@ -120,21 +135,21 @@ async def get_project(project_id: str) -> Dict[str, object]:
 
 
 @app.patch("/internal/v1/projects/{project_id}")
-async def update_project(project_id: str, payload: ProjectUpdate, role: Role = Depends(require_write)) -> Dict[str, object]:
+async def update_project(project_id: str, payload: ProjectUpdate, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, object]:
     project = await get_project(project_id)
     updates = payload.model_dump(exclude_none=True)
     project.update(updates)
     project["updatedAt"] = store.now()
-    store.audit(project_id, "local-owner", "project.updated")
+    store.audit(project_id, actor, "project.updated")
     return project
 
 
 @app.post("/internal/v1/projects/{project_id}/environments", status_code=status.HTTP_201_CREATED)
-async def create_environment(project_id: str, payload: EnvironmentCreate, role: Role = Depends(require_write)) -> Dict[str, object]:
+async def create_environment(project_id: str, payload: EnvironmentCreate, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, object]:
     await get_project(project_id)
     environment = {"id": f"env_{uuid4().hex[:12]}", **payload.model_dump()}
     store.environments.setdefault(project_id, []).append(environment)
-    store.audit(project_id, "local-owner", "environment.created")
+    store.audit(project_id, actor, "environment.created")
     return environment
 
 
@@ -160,21 +175,21 @@ async def list_members(project_id: str) -> List[Dict[str, str]]:
 
 
 @app.post("/internal/v1/projects/{project_id}/members", status_code=status.HTTP_201_CREATED)
-async def create_member(project_id: str, payload: MemberCreate, role: Role = Depends(require_write)) -> Dict[str, str]:
+async def create_member(project_id: str, payload: MemberCreate, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, str]:
     await get_project(project_id)
     member = {"userId": payload.user_id, "role": payload.role}
     store.members.setdefault(project_id, []).append(member)
-    store.audit(project_id, "local-owner", "member.created")
+    store.audit(project_id, actor, "member.created")
     return member
 
 
 @app.patch("/internal/v1/projects/{project_id}/members/{user_id}")
-async def update_member(project_id: str, user_id: str, payload: MemberUpdate, role: Role = Depends(require_write)) -> Dict[str, str]:
+async def update_member(project_id: str, user_id: str, payload: MemberUpdate, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, str]:
     await get_project(project_id)
     for member in store.members.get(project_id, []):
         if member["userId"] == user_id:
             member["role"] = payload.role
-            store.audit(project_id, "local-owner", "member.updated")
+            store.audit(project_id, actor, "member.updated")
             return member
     raise HTTPException(status_code=404, detail="member not found")
 
