@@ -24,9 +24,12 @@ services:
 
   project-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/project-service}}
-    environment: {PYTHONPATH: /app/packages/python:/app/services/project-service}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/project-service
+      OPENKATE_PROJECT_DATABASE_URL: postgresql://openkate:change-me@postgres:5432/openkate
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
     ports: ["8001:8001"]
+    depends_on: [postgres]
 
   gateway-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/gateway-service}}
