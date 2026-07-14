@@ -1,0 +1,15 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# JavaScript
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Environment and operating system files
+.env
+.DS_Store
