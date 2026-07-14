@@ -1,5 +1,7 @@
 import json
 import os
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -15,6 +17,22 @@ VALIDATION_SERVICE_URL = os.getenv("OPENKATE_VALIDATION_SERVICE_URL", "http://12
 REPORT_SERVICE_URL = os.getenv("OPENKATE_REPORT_SERVICE_URL", "http://127.0.0.1:8003")
 EXECUTION_SERVICE_URL = os.getenv("OPENKATE_EXECUTION_SERVICE_URL", "http://127.0.0.1:8004")
 WORKFLOW_SERVICE_URL = os.getenv("OPENKATE_WORKFLOW_SERVICE_URL", "http://127.0.0.1:8005")
+ASSET_SERVICE_URL = os.getenv("OPENKATE_ASSET_SERVICE_URL", "http://127.0.0.1:8006")
+AGENT_SERVICE_URL = os.getenv("OPENKATE_AGENT_SERVICE_URL", "http://127.0.0.1:8007")
+GOVERNANCE_SERVICE_URL = os.getenv("OPENKATE_GOVERNANCE_SERVICE_URL", "http://127.0.0.1:8008")
+CONNECTOR_SERVICE_URL = os.getenv("OPENKATE_CONNECTOR_SERVICE_URL", "http://127.0.0.1:8009")
+EXECUTOR_UI_URL = os.getenv("OPENKATE_EXECUTOR_UI_URL", "http://127.0.0.1:8011")
+EXECUTOR_API_URL = os.getenv("OPENKATE_EXECUTOR_API_URL", "http://127.0.0.1:8012")
+EXECUTOR_STATE_URL = os.getenv("OPENKATE_EXECUTOR_STATE_URL", "http://127.0.0.1:8013")
+SERVICE_CATALOG = {
+    "project-service": PROJECT_SERVICE_URL, "validation-service": VALIDATION_SERVICE_URL,
+    "report-service": REPORT_SERVICE_URL, "execution-service": EXECUTION_SERVICE_URL,
+    "workflow-service": WORKFLOW_SERVICE_URL, "asset-service": ASSET_SERVICE_URL,
+    "agent-service": AGENT_SERVICE_URL, "governance-service": GOVERNANCE_SERVICE_URL,
+    "connector-service": CONNECTOR_SERVICE_URL, "executor-ui": EXECUTOR_UI_URL,
+    "executor-api": EXECUTOR_API_URL, "executor-state": EXECUTOR_STATE_URL,
+}
+rate_windows: Dict[str, deque[float]] = defaultdict(deque)
 
 app = FastAPI(title="gateway-service", version="0.2.0")
 app.add_middleware(
@@ -68,6 +86,16 @@ async def authenticate(request: Request, call_next):
         if not isinstance(subject, str) or not subject or role not in {"owner", "maintainer", "reviewer", "developer", "viewer"}:
             return error_response(403, "INVALID_IDENTITY", "access token has no supported subject and role", request_id)
         request.state.identity = {"id": subject, "name": claims.get("name", subject), "email": claims.get("email"), "role": role, "roles": roles or [role]}
+        limit = int(os.getenv("OPENKATE_RATE_LIMIT_PER_MINUTE", "120"))
+        window = rate_windows[subject]
+        now = time.monotonic()
+        while window and window[0] <= now - 60:
+            window.popleft()
+        if len(window) >= limit:
+            response = error_response(429, "RATE_LIMIT_EXCEEDED", "request rate limit exceeded", request_id)
+            response.headers["Retry-After"] = "60"
+            return response
+        window.append(now)
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response
@@ -167,13 +195,26 @@ async def health() -> Dict[str, str]:
 async def system_health() -> Dict[str, Any]:
     services: List[Dict[str, str]] = [{"service": "gateway-service", "status": "ready"}]
     async with httpx.AsyncClient(timeout=1.0) as client:
-        for service, url in (("project-service", PROJECT_SERVICE_URL), ("validation-service", VALIDATION_SERVICE_URL), ("report-service", REPORT_SERVICE_URL), ("execution-service", EXECUTION_SERVICE_URL), ("workflow-service", WORKFLOW_SERVICE_URL)):
+        for service, url in SERVICE_CATALOG.items():
             try:
                 response = await client.get(f"{url}/health")
                 services.append({"service": service, "status": "ready" if response.is_success else "degraded"})
             except httpx.HTTPError:
                 services.append({"service": service, "status": "unavailable"})
     return {"status": "ready" if all(item["status"] == "ready" for item in services) else "degraded", "services": services}
+
+
+@app.get("/api/v1/openapi")
+async def openapi_catalog() -> Dict[str, Any]:
+    documents: Dict[str, Any] = {"gateway-service": app.openapi()}
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        for service, url in SERVICE_CATALOG.items():
+            try:
+                response = await client.get(f"{url}/openapi.json")
+                documents[service] = response.json() if response.is_success else {"status": "unavailable"}
+            except httpx.HTTPError:
+                documents[service] = {"status": "unavailable"}
+    return {"services": documents}
 
 
 @app.get("/api/v1/me")

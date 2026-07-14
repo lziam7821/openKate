@@ -61,6 +61,26 @@ def test_me_returns_verified_identity_and_request_id(monkeypatch) -> None:
     assert response.json() == {"id": "user-42", "name": "Ada", "email": "ada@example.test", "role": "owner", "roles": ["owner"]}
 
 
+def test_authenticated_requests_are_rate_limited(monkeypatch) -> None:
+    configure_auth(monkeypatch)
+    monkeypatch.setenv("OPENKATE_RATE_LIMIT_PER_MINUTE", "1")
+    gateway_service.rate_windows.clear()
+    assert client.get("/api/v1/me", headers=auth_headers()).status_code == 200
+    blocked = client.get("/api/v1/me", headers=auth_headers())
+    assert blocked.status_code == 429
+    assert blocked.headers["Retry-After"] == "60"
+    assert blocked.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+    gateway_service.rate_windows.clear()
+
+
+def test_health_catalog_covers_domain_services_and_workers() -> None:
+    assert set(gateway_service.SERVICE_CATALOG) == {
+        "project-service", "validation-service", "report-service", "execution-service", "workflow-service",
+        "asset-service", "agent-service", "governance-service", "connector-service",
+        "executor-ui", "executor-api", "executor-state",
+    }
+
+
 def test_gateway_uses_verified_identity_for_public_project_routes(monkeypatch) -> None:
     configure_auth(monkeypatch)
     calls: list[tuple[str, str, dict[str, str], object]] = []
