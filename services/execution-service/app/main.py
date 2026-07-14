@@ -11,6 +11,7 @@ app = FastAPI(title="execution-service", version="0.3.0")
 
 Channel = Literal["ui", "api", "state"]
 TEMPLATE_PATTERN = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*}}")
+SENSITIVE_PARTS = {"authorization", "cookie", "password", "secret", "token", "api_key", "apikey", "access_token", "refresh_token"}
 
 
 class ApiModel(BaseModel):
@@ -179,7 +180,13 @@ def get_run(run_id: str) -> Dict[str, Any]:
 def public_run(run: Dict[str, Any]) -> Dict[str, Any]:
     result = deepcopy(run)
     result.pop("_variables", None)
+    result.pop("_sensitiveVariables", None)
     return result
+
+
+def sensitive_variable(name: str) -> bool:
+    normalized = name.lower().replace("-", "_")
+    return normalized in SENSITIVE_PARTS or any(normalized.endswith(f"_{part}") for part in SENSITIVE_PARTS)
 
 
 def release_lease(run: Dict[str, Any]) -> None:
@@ -239,6 +246,7 @@ def create_run_record(
         "attempt": 1 if retry_of is None else store.runs[retry_of]["attempt"] + 1,
         "variables": sorted({**plan["variables"], **variables}),
         "_variables": {**deepcopy(plan["variables"]), **deepcopy(variables)},
+        "_sensitiveVariables": sorted(name for name in {**plan["variables"], **variables} if sensitive_variable(name)),
         "stepResults": [
             {"stepId": step_id, "status": "pending", "startedAt": None, "completedAt": None, "outputSummary": {}, "assertions": [], "evidenceRefs": [], "error": None}
             for step_id in plan["orderedStepIds"]
@@ -260,6 +268,19 @@ def result_for(run: Dict[str, Any], step_id: str) -> Dict[str, Any]:
         if result["stepId"] == step_id:
             return result
     raise HTTPException(status_code=404, detail="execution step not found")
+
+
+def require_active_deadline(run: Dict[str, Any]) -> None:
+    if datetime.now(timezone.utc) < datetime.fromisoformat(run["deadline"]):
+        return
+    run["status"] = "failed"
+    run["completedAt"] = store.now()
+    for result in run["stepResults"]:
+        if result["status"] in {"pending", "running"}:
+            result.update({"status": "failed", "completedAt": store.now(), "error": {"category": "timeout", "message": "execution plan deadline exceeded"}})
+    release_lease(run)
+    store.run_event("execution.run.completed.v1", run, {"runId": run["id"], "status": "failed", "category": "timeout"})
+    raise HTTPException(status_code=408, detail="execution plan deadline exceeded")
 
 
 def value_at_path(value: Any, path: str) -> Any:
@@ -393,6 +414,7 @@ async def start_step(run_id: str, step_id: str) -> Dict[str, Any]:
     run = get_run(run_id)
     if run["status"] != "running":
         raise HTTPException(status_code=409, detail="run is not active")
+    require_active_deadline(run)
     result = result_for(run, step_id)
     if result["status"] != "pending":
         raise HTTPException(status_code=409, detail="step is not pending")
@@ -417,6 +439,9 @@ async def complete_step(run_id: str, step_id: str, payload: StepComplete) -> Dic
     step = next(item for item in plan["steps"] if item["id"] == step_id)
     for output_path, variable in step["save"].items():
         run["_variables"][variable] = value_at_path(payload.output, output_path)
+        if sensitive_variable(variable) and variable not in run["_sensitiveVariables"]:
+            run["_sensitiveVariables"].append(variable)
+            run["_sensitiveVariables"].sort()
         if variable not in run["variables"]:
             run["variables"].append(variable)
             run["variables"].sort()

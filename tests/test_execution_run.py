@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from test_execution_plan import client, execution_service, reset_store, valid_plan
 
 
@@ -106,3 +108,30 @@ def test_configured_account_and_dataset_cannot_be_leased_twice() -> None:
         json=payload,
     )
     assert available.status_code == 202
+
+
+def test_deadline_failure_releases_lease() -> None:
+    reset_store()
+    plan = create_plan()
+    run = create_run(plan["id"]).json()
+    execution_service.store.runs[run["id"]]["deadline"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    response = client.post(f"/internal/v1/runs/{run['id']}/steps/place_order/start")
+    assert response.status_code == 408
+    assert execution_service.store.runs[run["id"]]["status"] == "failed"
+    assert execution_service.store.leases[run["leaseId"]]["status"] == "released"
+
+
+def test_sensitive_variables_are_classified_and_never_returned() -> None:
+    reset_store()
+    payload = valid_plan()
+    payload["variables"]["access_token"] = "secret-value"
+    plan = client.post(
+        "/internal/v1/scenarios/scenario_checkout/execution-plans",
+        headers={"X-OpenKATE-Project-Id": "project_checkout"},
+        json=payload,
+    ).json()
+    run = create_run(plan["id"], "sensitive-run").json()
+    stored = execution_service.store.runs[run["id"]]
+    assert stored["_sensitiveVariables"] == ["access_token"]
+    assert "secret-value" not in str(run)
+    assert "secret-value" not in str(client.get(f"/internal/v1/runs/{run['id']}/events").json())
