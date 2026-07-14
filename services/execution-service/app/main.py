@@ -47,6 +47,9 @@ class RunCreate(ApiModel):
     plan_id: str = Field(alias="planId", min_length=1)
     environment_id: str = Field(alias="environmentId", min_length=1)
     variables: Dict[str, Any] = Field(default_factory=dict)
+    allowed_hosts: List[str] = Field(default_factory=list, alias="allowedHosts")
+    account_refs: List[str] = Field(default_factory=list, alias="accountRefs")
+    data_set_refs: List[str] = Field(default_factory=list, alias="dataSetRefs")
 
 
 class StepComplete(ApiModel):
@@ -186,15 +189,35 @@ def release_lease(run: Dict[str, Any]) -> None:
         lease["releasedAt"] = store.now()
 
 
-def create_run_record(plan: Dict[str, Any], environment_id: str, variables: Dict[str, Any], retry_of: Optional[str] = None) -> Dict[str, Any]:
+def available_resource(field: str, configured: List[str], prefix: str) -> str:
+    if not configured:
+        return f"{prefix}_{uuid4().hex[:12]}"
+    active = {lease[field] for lease in store.leases.values() if lease["status"] == "active"}
+    for reference in configured:
+        if reference not in active:
+            return reference
+    raise HTTPException(status_code=409, detail=f"no {prefix} resource is available")
+
+
+def create_run_record(
+    plan: Dict[str, Any],
+    environment_id: str,
+    variables: Dict[str, Any],
+    allowed_hosts: Optional[List[str]] = None,
+    account_refs: Optional[List[str]] = None,
+    data_set_refs: Optional[List[str]] = None,
+    retry_of: Optional[str] = None,
+) -> Dict[str, Any]:
     now = store.now()
     run_id = f"run_{uuid4().hex[:12]}"
     lease_id = f"lease_{uuid4().hex[:12]}"
+    account_pool = account_refs or []
+    data_set_pool = data_set_refs or []
     lease = {
         "id": lease_id,
         "runId": run_id,
-        "accountLeaseId": f"account_{uuid4().hex[:12]}",
-        "dataSetId": f"dataset_{uuid4().hex[:12]}",
+        "accountLeaseId": available_resource("accountLeaseId", account_pool, "account"),
+        "dataSetId": available_resource("dataSetId", data_set_pool, "dataset"),
         "browserContextId": f"browser_{run_id}",
         "status": "active",
         "acquiredAt": now,
@@ -207,6 +230,9 @@ def create_run_record(plan: Dict[str, Any], environment_id: str, variables: Dict
         "scenarioVersion": plan["scenarioVersion"],
         "planId": plan["id"],
         "environmentId": environment_id,
+        "allowedHosts": list(allowed_hosts or []),
+        "accountPool": list(account_pool),
+        "dataSetPool": list(data_set_pool),
         "status": "running",
         "leaseId": lease_id,
         "retryOf": retry_of,
@@ -339,7 +365,7 @@ async def create_run(
     plan = get_plan(payload.plan_id)
     if plan["projectId"] != x_project_id or plan["scenarioId"] != scenario_id:
         raise HTTPException(status_code=404, detail="execution plan not found for scenario")
-    run = create_run_record(plan, payload.environment_id, payload.variables)
+    run = create_run_record(plan, payload.environment_id, payload.variables, payload.allowed_hosts, payload.account_refs, payload.data_set_refs)
     store.idempotency[key] = run["id"]
     return public_run(run)
 
@@ -455,6 +481,14 @@ async def retry_run(run_id: str, idempotency_key: Optional[str] = Header(default
     key = f"{previous['projectId']}:{idempotency_key}"
     if existing_id := store.idempotency.get(key):
         return public_run(get_run(existing_id))
-    retried = create_run_record(get_plan(previous["planId"]), previous["environmentId"], {}, retry_of=run_id)
+    retried = create_run_record(
+        get_plan(previous["planId"]),
+        previous["environmentId"],
+        {},
+        previous["allowedHosts"],
+        previous["accountPool"],
+        previous["dataSetPool"],
+        retry_of=run_id,
+    )
     store.idempotency[key] = retried["id"]
     return public_run(retried)

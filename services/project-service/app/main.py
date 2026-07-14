@@ -24,6 +24,10 @@ class EnvironmentCreate(BaseModel):
     name: str = Field(min_length=2, max_length=100)
     base_url: str = Field(min_length=8, max_length=300)
     write_policy: Literal["deny", "read_only", "approval_required"] = "deny"
+    allowed_hosts: List[str] = Field(default_factory=list)
+    account_refs: List[str] = Field(default_factory=list)
+    data_set_refs: List[str] = Field(default_factory=list)
+    secret_refs: Dict[str, str] = Field(default_factory=dict)
 
 
 class MemberCreate(BaseModel):
@@ -123,12 +127,27 @@ async def update_project(project_id: str, payload: ProjectUpdate, role: Role = D
 
 
 @app.post("/internal/v1/projects/{project_id}/environments", status_code=status.HTTP_201_CREATED)
-async def create_environment(project_id: str, payload: EnvironmentCreate, role: Role = Depends(require_write)) -> Dict[str, str]:
+async def create_environment(project_id: str, payload: EnvironmentCreate, role: Role = Depends(require_write)) -> Dict[str, object]:
     await get_project(project_id)
     environment = {"id": f"env_{uuid4().hex[:12]}", **payload.model_dump()}
     store.environments.setdefault(project_id, []).append(environment)
     store.audit(project_id, "local-owner", "environment.created")
     return environment
+
+
+@app.get("/internal/v1/projects/{project_id}/environments")
+async def list_environments(project_id: str) -> List[Dict[str, object]]:
+    await get_project(project_id)
+    return store.environments.get(project_id, [])
+
+
+@app.get("/internal/v1/projects/{project_id}/environments/{environment_id}")
+async def get_environment(project_id: str, environment_id: str) -> Dict[str, object]:
+    await get_project(project_id)
+    for environment in store.environments.get(project_id, []):
+        if environment["id"] == environment_id:
+            return environment
+    raise HTTPException(status_code=404, detail="environment not found")
 
 
 @app.get("/internal/v1/projects/{project_id}/members")
@@ -161,4 +180,3 @@ async def update_member(project_id: str, user_id: str, payload: MemberUpdate, ro
 async def list_audit_logs(project_id: str) -> List[Dict[str, str]]:
     await get_project(project_id)
     return list(reversed(store.audit_logs.get(project_id, [])))
-

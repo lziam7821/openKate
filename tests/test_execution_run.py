@@ -75,3 +75,34 @@ def test_cancel_releases_resources_and_failed_run_can_retry() -> None:
     assert retried.json()["retryOf"] == run["id"]
     assert retried.json()["leaseId"] != run["leaseId"]
     assert retried.json()["attempt"] == 2
+
+
+def test_configured_account_and_dataset_cannot_be_leased_twice() -> None:
+    reset_store()
+    plan = create_plan()
+    payload = {
+        "planId": plan["id"],
+        "environmentId": "staging",
+        "allowedHosts": ["shop.test"],
+        "accountRefs": ["account-ref-1"],
+        "dataSetRefs": ["dataset-ref-1"],
+    }
+    first = client.post(
+        "/internal/v1/scenarios/scenario_checkout/runs",
+        headers={"X-OpenKATE-Project-Id": "project_checkout", "Idempotency-Key": "pool-1"},
+        json=payload,
+    )
+    assert first.status_code == 202
+    blocked = client.post(
+        "/internal/v1/scenarios/scenario_checkout/runs",
+        headers={"X-OpenKATE-Project-Id": "project_checkout", "Idempotency-Key": "pool-2"},
+        json=payload,
+    )
+    assert blocked.status_code == 409
+    client.post(f"/internal/v1/runs/{first.json()['id']}/cancel")
+    available = client.post(
+        "/internal/v1/scenarios/scenario_checkout/runs",
+        headers={"X-OpenKATE-Project-Id": "project_checkout", "Idempotency-Key": "pool-3"},
+        json=payload,
+    )
+    assert available.status_code == 202
