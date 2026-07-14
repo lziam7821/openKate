@@ -8,7 +8,7 @@ import httpx
 import jwt
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 PROJECT_SERVICE_URL = os.getenv("OPENKATE_PROJECT_SERVICE_URL", "http://127.0.0.1:8001")
 VALIDATION_SERVICE_URL = os.getenv("OPENKATE_VALIDATION_SERVICE_URL", "http://127.0.0.1:8002")
@@ -97,14 +97,16 @@ def proxy_error(response: httpx.Response) -> JSONResponse:
     return JSONResponse(status_code=response.status_code, content={"error": {"code": code, "message": message, "requestId": str(uuid4()), "details": {}}})
 
 
-def proxy_success(response: httpx.Response, extra_headers: Optional[Dict[str, str]] = None) -> JSONResponse:
+def proxy_success(response: httpx.Response, extra_headers: Optional[Dict[str, str]] = None) -> Response:
     headers = extra_headers or {}
     if etag := response.headers.get("etag"):
         headers["ETag"] = etag
+    if response.status_code == 204:
+        return Response(status_code=204, headers=headers)
     return JSONResponse(status_code=response.status_code, content=response.json(), headers=headers)
 
 
-async def project_request(method: str, path: str, request: Request, payload: Any = None) -> JSONResponse:
+async def project_request(method: str, path: str, request: Request, payload: Any = None) -> Response:
     try:
         response = await upstream(PROJECT_SERVICE_URL, method, path, request, payload)
     except httpx.HTTPError:
@@ -209,6 +211,11 @@ async def update_project(project_id: str, request: Request) -> JSONResponse:
     return await project_request("PATCH", f"/internal/v1/projects/{project_id}", request, await request.json())
 
 
+@app.post("/api/v1/projects/{project_id}/archive")
+async def archive_project(project_id: str, request: Request) -> JSONResponse:
+    return await project_request("POST", f"/internal/v1/projects/{project_id}/archive", request)
+
+
 @app.post("/api/v1/projects/{project_id}/environments", status_code=201)
 async def create_environment(project_id: str, request: Request) -> JSONResponse:
     return await project_request("POST", f"/internal/v1/projects/{project_id}/environments", request, await request.json())
@@ -217,6 +224,11 @@ async def create_environment(project_id: str, request: Request) -> JSONResponse:
 @app.get("/api/v1/projects/{project_id}/environments")
 async def list_environments(project_id: str, request: Request) -> JSONResponse:
     return await project_request("GET", f"/internal/v1/projects/{project_id}/environments", request)
+
+
+@app.patch("/api/v1/projects/{project_id}/environments/{environment_id}")
+async def update_environment(project_id: str, environment_id: str, request: Request) -> JSONResponse:
+    return await project_request("PATCH", f"/internal/v1/projects/{project_id}/environments/{environment_id}", request, await request.json())
 
 
 @app.get("/api/v1/projects/{project_id}/members")
@@ -232,6 +244,11 @@ async def create_member(project_id: str, request: Request) -> JSONResponse:
 @app.patch("/api/v1/projects/{project_id}/members/{member_id}")
 async def update_member(project_id: str, member_id: str, request: Request) -> JSONResponse:
     return await project_request("PATCH", f"/internal/v1/projects/{project_id}/members/{member_id}", request, await request.json())
+
+
+@app.delete("/api/v1/projects/{project_id}/members/{member_id}", status_code=204)
+async def delete_member(project_id: str, member_id: str, request: Request):
+    return await project_request("DELETE", f"/internal/v1/projects/{project_id}/members/{member_id}", request)
 
 
 @app.get("/api/v1/projects/{project_id}/audit-logs")

@@ -62,5 +62,39 @@ def test_owner_can_create_workspace_and_manage_project_members_with_actor_audit(
     assert member.status_code == 201
     updated = client.patch(f"/internal/v1/projects/{project_id}/members/reviewer-lin", headers=headers, json={"role": "developer"})
     assert updated.json()["role"] == "developer"
-    audit = client.get(f"/internal/v1/projects/{project_id}/audit-logs").json()
+    audit = client.get(f"/internal/v1/projects/{project_id}/audit-logs", headers=headers).json()
     assert {item["actor"] for item in audit} == {"owner-ada"}
+
+
+def test_project_membership_controls_management_and_audits_lifecycle() -> None:
+    owner = {"X-OpenKATE-Role": "owner", "X-OpenKATE-Actor": "owner-kai"}
+    project = client.post("/internal/v1/workspaces/workspace_demo/projects", headers=owner, json={"name": "Membership"}).json()
+    project_id = project["id"]
+    client.post(f"/internal/v1/projects/{project_id}/members", headers=owner, json={"user_id": "maintainer-lee", "role": "maintainer"})
+    client.post(f"/internal/v1/projects/{project_id}/members", headers=owner, json={"user_id": "viewer-mo", "role": "viewer"})
+    environment = client.post(
+        f"/internal/v1/projects/{project_id}/environments",
+        headers=owner,
+        json={"name": "Staging", "base_url": "https://staging.test", "write_policy": "read_only"},
+    ).json()
+
+    viewer = {"X-OpenKATE-Role": "owner", "X-OpenKATE-Actor": "viewer-mo"}
+    denied = client.patch(f"/internal/v1/projects/{project_id}/environments/{environment['id']}", headers=viewer, json={"name": "Denied"})
+    assert denied.status_code == 403
+
+    maintainer = {"X-OpenKATE-Role": "maintainer", "X-OpenKATE-Actor": "maintainer-lee"}
+    updated = client.patch(
+        f"/internal/v1/projects/{project_id}/environments/{environment['id']}",
+        headers=maintainer,
+        json={"name": "Pre-production", "write_policy": "approval_required"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["write_policy"] == "approval_required"
+    assert client.post(f"/internal/v1/projects/{project_id}/members", headers=maintainer, json={"user_id": "other", "role": "viewer"}).status_code == 403
+
+    assert client.delete(f"/internal/v1/projects/{project_id}/members/viewer-mo", headers=owner).status_code == 204
+    archived = client.post(f"/internal/v1/projects/{project_id}/archive", headers=owner)
+    assert archived.status_code == 200
+    assert archived.json()["archivedAt"] is not None
+    actions = {item["action"] for item in client.get(f"/internal/v1/projects/{project_id}/audit-logs", headers=owner).json()}
+    assert {"environment.updated", "member.removed", "project.archived"}.issubset(actions)
