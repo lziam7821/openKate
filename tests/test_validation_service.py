@@ -130,3 +130,34 @@ def test_permissions_filters_and_illegal_transitions() -> None:
     listed = client.get("/internal/v1/projects/project_checkout/scenarios?status=draft&risk=high&tag=payment&owner=qa-ada")
     assert listed.status_code == 200
     assert listed.json()["total"] == 1
+
+
+def test_review_resolution_and_approved_terminal_transitions() -> None:
+    reset_store()
+    scenario = create_scenario()
+    scenario_id = scenario["id"]
+    submitted = client.post(f"/internal/v1/scenarios/{scenario_id}/submit-review", headers={"X-OpenKATE-Role": "developer", "If-Match": '"1"'})
+    review = client.post(
+        f"/internal/v1/scenarios/{scenario_id}/reviews",
+        headers={"X-OpenKATE-Role": "reviewer", "If-Match": etag(submitted)},
+        json={"content": "Confirm payment callback evidence"},
+    )
+    review_id = review.json()["reviews"][0]["id"]
+    resolved = client.patch(
+        f"/internal/v1/scenarios/{scenario_id}/reviews/{review_id}",
+        headers={"X-OpenKATE-Role": "reviewer", "If-Match": etag(review)},
+        json={"status": "resolved"},
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["reviews"][0]["status"] == "resolved"
+    approved = client.post(f"/internal/v1/scenarios/{scenario_id}/approve", headers={"X-OpenKATE-Role": "reviewer", "If-Match": etag(resolved)})
+    deprecated = client.post(f"/internal/v1/scenarios/{scenario_id}/deprecate", headers={"X-OpenKATE-Role": "owner", "If-Match": etag(approved)})
+    assert deprecated.status_code == 200
+    assert deprecated.json()["status"] == "deprecated"
+
+    second = create_scenario()
+    submitted = client.post(f"/internal/v1/scenarios/{second['id']}/submit-review", headers={"X-OpenKATE-Role": "developer", "If-Match": '"1"'})
+    approved = client.post(f"/internal/v1/scenarios/{second['id']}/approve", headers={"X-OpenKATE-Role": "reviewer", "If-Match": etag(submitted)})
+    archived = client.post(f"/internal/v1/scenarios/{second['id']}/archive", headers={"X-OpenKATE-Role": "owner", "If-Match": etag(approved)})
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"

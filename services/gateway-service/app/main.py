@@ -272,6 +272,11 @@ async def create_review(scenario_id: str, request: Request) -> JSONResponse:
     return await scenario_write("POST", f"/internal/v1/scenarios/{scenario_id}/reviews", request, await request.json())
 
 
+@app.patch("/api/v1/scenarios/{scenario_id}/reviews/{review_id}")
+async def update_review(scenario_id: str, review_id: str, request: Request) -> JSONResponse:
+    return await scenario_write("PATCH", f"/internal/v1/scenarios/{scenario_id}/reviews/{review_id}", request, await request.json())
+
+
 @app.post("/api/v1/scenarios/{scenario_id}/approve")
 async def approve_scenario(scenario_id: str, request: Request) -> JSONResponse:
     return await scenario_write("POST", f"/internal/v1/scenarios/{scenario_id}/approve", request)
@@ -280,6 +285,16 @@ async def approve_scenario(scenario_id: str, request: Request) -> JSONResponse:
 @app.post("/api/v1/scenarios/{scenario_id}/reject")
 async def reject_scenario(scenario_id: str, request: Request) -> JSONResponse:
     return await scenario_write("POST", f"/internal/v1/scenarios/{scenario_id}/reject", request, await request.json())
+
+
+@app.post("/api/v1/scenarios/{scenario_id}/archive")
+async def archive_scenario(scenario_id: str, request: Request) -> JSONResponse:
+    return await scenario_write("POST", f"/internal/v1/scenarios/{scenario_id}/archive", request)
+
+
+@app.post("/api/v1/scenarios/{scenario_id}/deprecate")
+async def deprecate_scenario(scenario_id: str, request: Request) -> JSONResponse:
+    return await scenario_write("POST", f"/internal/v1/scenarios/{scenario_id}/deprecate", request)
 
 
 @app.get("/api/v1/scenarios/{scenario_id}/versions")

@@ -73,6 +73,10 @@ class ReviewCreate(ApiModel):
     status: Literal["open", "resolved"] = "open"
 
 
+class ReviewUpdate(ApiModel):
+    status: Literal["open", "resolved"]
+
+
 class RejectRequest(ApiModel):
     reason: str = Field(min_length=1, max_length=4000)
 
@@ -372,6 +376,30 @@ async def create_review(
     return response_with_etag(response, scenario)
 
 
+@app.patch("/internal/v1/scenarios/{scenario_id}/reviews/{review_id}")
+async def update_review(
+    scenario_id: str,
+    review_id: str,
+    payload: ReviewUpdate,
+    response: Response,
+    if_match: Optional[str] = Header(default=None, alias="If-Match"),
+    role: Role = Depends(require_role("owner", "maintainer", "reviewer")),
+    actor: str = Depends(actor_name),
+) -> Dict[str, Any]:
+    scenario = get_scenario(scenario_id)
+    require_match(scenario, if_match)
+    previous_revision = scenario["revision"]
+    if scenario["status"] != "in_review":
+        raise HTTPException(status_code=409, detail="reviews can only be resolved while a scenario is in review")
+    review = next((item for item in scenario["reviews"] if item["id"] == review_id), None)
+    if review is None:
+        raise HTTPException(status_code=404, detail="review not found")
+    review["status"] = payload.status
+    touch(scenario, actor, "scenario.review.updated")
+    store.save(scenario, previous_revision)
+    return response_with_etag(response, scenario)
+
+
 @app.post("/internal/v1/scenarios/{scenario_id}/approve")
 async def approve_scenario(
     scenario_id: str,
@@ -431,6 +459,25 @@ async def archive_scenario(
     touch(scenario, actor, "scenario.archived")
     store.save(scenario, previous_revision)
     store.event("validation.scenario.archived.v1", scenario)
+    return response_with_etag(response, scenario)
+
+
+@app.post("/internal/v1/scenarios/{scenario_id}/deprecate")
+async def deprecate_scenario(
+    scenario_id: str,
+    response: Response,
+    if_match: Optional[str] = Header(default=None, alias="If-Match"),
+    role: Role = Depends(require_role("owner", "maintainer")),
+    actor: str = Depends(actor_name),
+) -> Dict[str, Any]:
+    scenario = get_scenario(scenario_id)
+    require_match(scenario, if_match)
+    previous_revision = scenario["revision"]
+    if scenario["status"] != "approved":
+        raise HTTPException(status_code=409, detail="only approved scenarios can be deprecated")
+    scenario["status"] = "deprecated"
+    touch(scenario, actor, "scenario.deprecated")
+    store.save(scenario, previous_revision)
     return response_with_etag(response, scenario)
 
 
