@@ -44,9 +44,12 @@ class ProjectStore:
         self.workspaces: Dict[str, Dict[str, str]] = {
             "workspace_demo": {"id": "workspace_demo", "name": "OpenKATE Demo"}
         }
-        self.projects: Dict[str, Dict[str, object]] = {}
-        self.environments: Dict[str, List[Dict[str, str]]] = {}
-        self.members: Dict[str, List[Dict[str, str]]] = {}
+        now = self.now()
+        self.projects: Dict[str, Dict[str, object]] = {
+            "project_demo": {"id": "project_demo", "workspaceId": "workspace_demo", "name": "OpenKATE Demo", "description": "Execution Fabric demo project", "createdAt": now, "updatedAt": now}
+        }
+        self.environments: Dict[str, List[Dict[str, object]]] = {}
+        self.members: Dict[str, List[Dict[str, str]]] = {"project_demo": [{"userId": "local-owner", "role": "owner"}]}
         self.audit_logs: Dict[str, List[Dict[str, str]]] = {}
 
     @staticmethod

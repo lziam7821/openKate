@@ -35,9 +35,11 @@ services:
       OPENKATE_PROJECT_SERVICE_URL: http://project-service:8001
       OPENKATE_VALIDATION_SERVICE_URL: http://validation-service:8002
       OPENKATE_REPORT_SERVICE_URL: http://report-service:8003
+      OPENKATE_EXECUTION_SERVICE_URL: http://execution-service:8004
+      OPENKATE_WORKFLOW_SERVICE_URL: http://workflow-service:8005
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports: ["8000:8000"]
-    depends_on: [project-service, validation-service, report-service]
+    depends_on: [project-service, validation-service, report-service, execution-service, workflow-service]
 
   validation-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/validation-service}}
@@ -51,6 +53,48 @@ services:
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003"]
     ports: ["8003:8003"]
 
+  execution-service:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/execution-service}}
+    environment: {PYTHONPATH: /app/packages/python:/app/services/execution-service}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8004"]
+    expose: ["8004"]
+
+  workflow-service:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/workflow-service}}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/workflow-service
+      OPENKATE_EXECUTION_SERVICE_URL: http://execution-service:8004
+      OPENKATE_EXECUTOR_UI_URL: http://executor-ui:8011
+      OPENKATE_EXECUTOR_API_URL: http://executor-api:8012
+      OPENKATE_EXECUTOR_STATE_URL: http://executor-state:8013
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8005"]
+    expose: ["8005"]
+    depends_on: [execution-service, executor-ui, executor-api, executor-state]
+
+  executor-ui:
+    build: {context: ., dockerfile: deploy/docker/playwright-worker.Dockerfile, args: {SERVICE_PATH: workers/executor-ui}}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/workers/executor-ui
+      OPENKATE_ARTIFACT_DIR: /artifacts
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8011"]
+    expose: ["8011"]
+    volumes: ["execution_artifacts:/artifacts"]
+
+  executor-api:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: workers/executor-api}}
+    environment: {PYTHONPATH: /app/packages/python:/app/workers/executor-api}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8012"]
+    expose: ["8012"]
+
+  executor-state:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: workers/executor-state}}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/workers/executor-state
+      OPENKATE_SECRET_STAGING_DB: ${OPENKATE_SECRET_STAGING_DB:-}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8013"]
+    expose: ["8013"]
+
 volumes:
   postgres_data:
   minio_data:
+  execution_artifacts:

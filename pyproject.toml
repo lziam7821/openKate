@@ -1,6 +1,6 @@
 [project]
 name = "openkate"
-version = "0.2.0"
+version = "0.3.0"
 description = "OpenKATE intelligent business validation platform"
 requires-python = ">=3.9"
 

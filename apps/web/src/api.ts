@@ -9,6 +9,12 @@ export type ScenarioList = { items: Scenario[]; total: number; page: number; pag
 export type ScenarioVersion = Omit<Scenario, "revision" | "reviews">;
 export type Diff = { scenarioId: string; fromVersion: number; toVersion: number; changes: { field: string; from: unknown; to: unknown }[] };
 export type Health = { status: string; services: { service: string; status: string }[] };
+export type Environment = { id: string; name: string; base_url: string; write_policy: string; allowed_hosts: string[]; account_refs: string[]; data_set_refs: string[]; secret_refs: Record<string, string> };
+export type ExecutionStep = { id: string; channel: "ui" | "api" | "state"; action: string; dependsOn: string[]; input: Record<string, unknown>; save: Record<string, string>; timeoutMs: number; idempotent: boolean };
+export type ExecutionPlan = { id: string; scenarioId: string; scenarioVersion: number; status: string; version: number; revision: number; steps: ExecutionStep[]; orderedStepIds: string[]; variables: Record<string, unknown>; timeoutMs: number };
+export type StepResult = { stepId: string; status: "pending" | "running" | "completed" | "failed" | "canceled"; startedAt?: string; completedAt?: string; assertions: { passed?: boolean }[]; evidenceRefs: string[]; error?: { category: string; message: string } };
+export type ExecutionRun = { id: string; planId: string; scenarioId: string; status: "running" | "completed" | "failed" | "canceled"; attempt: number; retryOf?: string; leaseId: string; variables: string[]; stepResults: StepResult[]; createdAt: string; completedAt?: string };
+export type RunEvents = { events: { eventId: string; eventType: string; occurredAt: string; payload: Record<string, unknown> }[]; next: number };
 
 type ApiResult<T> = { data: T; etag?: string; degraded: boolean };
 
@@ -37,4 +43,12 @@ export const api = {
   reject: (id: string, reason: string, etag: string) => request<Scenario>(`/api/v1/scenarios/${id}/reject`, { method: "POST", headers: { "If-Match": etag }, body: JSON.stringify({ reason }) }),
   versions: (id: string) => request<ScenarioVersion[]>(`/api/v1/scenarios/${id}/versions`),
   diff: (id: string, fromVersion: number, toVersion: number) => request<Diff>(`/api/v1/scenarios/${id}/diff?fromVersion=${fromVersion}&toVersion=${toVersion}`),
+  environments: (projectId: string) => request<Environment[]>(`/api/v1/projects/${projectId}/environments`),
+  createEnvironment: (projectId: string, payload: object) => request<Environment>(`/api/v1/projects/${projectId}/environments`, { method: "POST", body: JSON.stringify(payload) }),
+  createExecutionPlan: (scenarioId: string, payload: object) => request<ExecutionPlan>(`/api/v1/scenarios/${scenarioId}/execution-plans`, { method: "POST", body: JSON.stringify(payload) }),
+  createRun: (scenarioId: string, payload: object) => request<ExecutionRun>(`/api/v1/scenarios/${scenarioId}/runs`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify(payload) }),
+  run: (runId: string) => request<ExecutionRun>(`/api/v1/runs/${runId}`),
+  runEvents: (runId: string) => request<RunEvents>(`/api/v1/runs/${runId}/events`),
+  cancelRun: (runId: string) => request<{ runId: string; status: string }>(`/api/v1/runs/${runId}/cancel`, { method: "POST" }),
+  retryRun: (runId: string) => request<ExecutionRun>(`/api/v1/runs/${runId}/retry`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } }),
 };

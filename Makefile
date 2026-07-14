@@ -1,8 +1,8 @@
 PYTHON := .venv/bin/python
 PIP := .venv/bin/pip
-PYTHONPATH := packages/python:services/project-service:services/validation-service:services/report-service:services/gateway-service
+PYTHONPATH := packages/python:services/project-service:services/validation-service:services/report-service:services/execution-service:services/workflow-service:services/gateway-service
 
-.PHONY: bootstrap test project validation report gateway health
+.PHONY: bootstrap test project validation report execution workflow gateway executor-ui executor-api executor-state health
 
 bootstrap:
 	python3 -m venv .venv
@@ -22,6 +22,21 @@ validation:
 
 report:
 	PYTHONPATH=packages/python:services/report-service $(PYTHON) -m uvicorn app.main:app --app-dir services/report-service --port 8003 --reload
+
+execution:
+	PYTHONPATH=packages/python:services/execution-service $(PYTHON) -m uvicorn app.main:app --app-dir services/execution-service --port 8004 --reload
+
+workflow:
+	PYTHONPATH=packages/python:services/workflow-service $(PYTHON) -m uvicorn app.main:app --app-dir services/workflow-service --port 8005 --reload
+
+executor-ui:
+	PYTHONPATH=packages/python:workers/executor-ui $(PYTHON) -m uvicorn app.main:app --app-dir workers/executor-ui --port 8011 --reload
+
+executor-api:
+	PYTHONPATH=packages/python:workers/executor-api $(PYTHON) -m uvicorn app.main:app --app-dir workers/executor-api --port 8012 --reload
+
+executor-state:
+	PYTHONPATH=packages/python:workers/executor-state $(PYTHON) -m uvicorn app.main:app --app-dir workers/executor-state --port 8013 --reload
 
 health:
 	curl -fsS http://127.0.0.1:8000/api/v1/system/health
