@@ -1,6 +1,6 @@
 import re
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Set
 from uuid import uuid4
 
@@ -43,9 +43,29 @@ class PlanUpdate(ApiModel):
     timeout_ms: Optional[int] = Field(default=None, alias="timeoutMs", ge=1000, le=3600000)
 
 
+class RunCreate(ApiModel):
+    plan_id: str = Field(alias="planId", min_length=1)
+    environment_id: str = Field(alias="environmentId", min_length=1)
+    variables: Dict[str, Any] = Field(default_factory=dict)
+
+
+class StepComplete(ApiModel):
+    output: Dict[str, Any] = Field(default_factory=dict)
+    assertions: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_refs: List[str] = Field(default_factory=list, alias="evidenceRefs")
+
+
+class StepFail(ApiModel):
+    category: str = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=1000)
+
+
 class ExecutionStore:
     def __init__(self) -> None:
         self.plans: Dict[str, Dict[str, Any]] = {}
+        self.runs: Dict[str, Dict[str, Any]] = {}
+        self.leases: Dict[str, Dict[str, Any]] = {}
+        self.idempotency: Dict[str, str] = {}
         self.events: List[Dict[str, Any]] = []
 
     @staticmethod
@@ -61,6 +81,18 @@ class ExecutionStore:
                 "aggregateId": plan["id"],
                 "occurredAt": self.now(),
                 "payload": {"executionPlan": deepcopy(plan)},
+            }
+        )
+
+    def run_event(self, event_type: str, run: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> None:
+        self.events.append(
+            {
+                "eventId": str(uuid4()),
+                "eventType": event_type,
+                "projectId": run["projectId"],
+                "aggregateId": run["id"],
+                "occurredAt": self.now(),
+                "payload": payload or {"runId": run["id"], "status": run["status"]},
             }
         )
 
@@ -132,6 +164,85 @@ def get_plan(plan_id: str) -> Dict[str, Any]:
     if plan is None:
         raise HTTPException(status_code=404, detail="execution plan not found")
     return plan
+
+
+def get_run(run_id: str) -> Dict[str, Any]:
+    run = store.runs.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="execution run not found")
+    return run
+
+
+def public_run(run: Dict[str, Any]) -> Dict[str, Any]:
+    result = deepcopy(run)
+    result.pop("_variables", None)
+    return result
+
+
+def release_lease(run: Dict[str, Any]) -> None:
+    lease = store.leases[run["leaseId"]]
+    if lease["status"] == "active":
+        lease["status"] = "released"
+        lease["releasedAt"] = store.now()
+
+
+def create_run_record(plan: Dict[str, Any], environment_id: str, variables: Dict[str, Any], retry_of: Optional[str] = None) -> Dict[str, Any]:
+    now = store.now()
+    run_id = f"run_{uuid4().hex[:12]}"
+    lease_id = f"lease_{uuid4().hex[:12]}"
+    lease = {
+        "id": lease_id,
+        "runId": run_id,
+        "accountLeaseId": f"account_{uuid4().hex[:12]}",
+        "dataSetId": f"dataset_{uuid4().hex[:12]}",
+        "browserContextId": f"browser_{run_id}",
+        "status": "active",
+        "acquiredAt": now,
+        "releasedAt": None,
+    }
+    run = {
+        "id": run_id,
+        "projectId": plan["projectId"],
+        "scenarioId": plan["scenarioId"],
+        "scenarioVersion": plan["scenarioVersion"],
+        "planId": plan["id"],
+        "environmentId": environment_id,
+        "status": "running",
+        "leaseId": lease_id,
+        "retryOf": retry_of,
+        "attempt": 1 if retry_of is None else store.runs[retry_of]["attempt"] + 1,
+        "variables": sorted({**plan["variables"], **variables}),
+        "_variables": {**deepcopy(plan["variables"]), **deepcopy(variables)},
+        "stepResults": [
+            {"stepId": step_id, "status": "pending", "startedAt": None, "completedAt": None, "outputSummary": {}, "assertions": [], "evidenceRefs": [], "error": None}
+            for step_id in plan["orderedStepIds"]
+        ],
+        "createdAt": now,
+        "startedAt": now,
+        "completedAt": None,
+        "deadline": (datetime.now(timezone.utc) + timedelta(milliseconds=plan["timeoutMs"])).isoformat(),
+    }
+    store.leases[lease_id] = lease
+    store.runs[run_id] = run
+    store.run_event("execution.run.requested.v1", run)
+    store.run_event("execution.run.started.v1", run)
+    return run
+
+
+def result_for(run: Dict[str, Any], step_id: str) -> Dict[str, Any]:
+    for result in run["stepResults"]:
+        if result["stepId"] == step_id:
+            return result
+    raise HTTPException(status_code=404, detail="execution step not found")
+
+
+def value_at_path(value: Any, path: str) -> Any:
+    current = value
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            raise HTTPException(status_code=422, detail=f"step output does not contain {path}")
+        current = current[part]
+    return current
 
 
 def require_match(plan: Dict[str, Any], if_match: Optional[str]) -> None:
@@ -211,3 +322,133 @@ async def update_execution_plan(plan_id: str, payload: PlanUpdate, response: Res
 @app.get("/internal/v1/events")
 async def list_events() -> List[Dict[str, Any]]:
     return deepcopy(store.events)
+
+
+@app.post("/internal/v1/scenarios/{scenario_id}/runs", status_code=status.HTTP_202_ACCEPTED)
+async def create_run(
+    scenario_id: str,
+    payload: RunCreate,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    x_project_id: str = Header(alias="X-OpenKATE-Project-Id"),
+) -> Dict[str, Any]:
+    if not idempotency_key:
+        raise HTTPException(status_code=428, detail="Idempotency-Key is required")
+    key = f"{x_project_id}:{idempotency_key}"
+    if existing_id := store.idempotency.get(key):
+        return public_run(get_run(existing_id))
+    plan = get_plan(payload.plan_id)
+    if plan["projectId"] != x_project_id or plan["scenarioId"] != scenario_id:
+        raise HTTPException(status_code=404, detail="execution plan not found for scenario")
+    run = create_run_record(plan, payload.environment_id, payload.variables)
+    store.idempotency[key] = run["id"]
+    return public_run(run)
+
+
+@app.get("/internal/v1/runs/{run_id}")
+async def run_detail(run_id: str) -> Dict[str, Any]:
+    return public_run(get_run(run_id))
+
+
+@app.get("/internal/v1/runs/{run_id}/events")
+async def run_events(run_id: str, after: int = 0) -> Dict[str, Any]:
+    get_run(run_id)
+    events = [event for event in store.events if event["aggregateId"] == run_id]
+    return {"events": deepcopy(events[after:]), "next": len(events)}
+
+
+@app.post("/internal/v1/runs/{run_id}/steps/{step_id}/start")
+async def start_step(run_id: str, step_id: str) -> Dict[str, Any]:
+    run = get_run(run_id)
+    if run["status"] != "running":
+        raise HTTPException(status_code=409, detail="run is not active")
+    result = result_for(run, step_id)
+    if result["status"] != "pending":
+        raise HTTPException(status_code=409, detail="step is not pending")
+    plan = get_plan(run["planId"])
+    step = next(item for item in plan["steps"] if item["id"] == step_id)
+    unfinished = [dependency for dependency in step["dependsOn"] if result_for(run, dependency)["status"] != "completed"]
+    if unfinished:
+        raise HTTPException(status_code=409, detail=f"step dependencies are incomplete: {', '.join(unfinished)}")
+    result["status"] = "running"
+    result["startedAt"] = store.now()
+    store.run_event("execution.step.started.v1", run, {"runId": run_id, "stepId": step_id, "channel": step["channel"]})
+    return deepcopy(result)
+
+
+@app.post("/internal/v1/runs/{run_id}/steps/{step_id}/complete")
+async def complete_step(run_id: str, step_id: str, payload: StepComplete) -> Dict[str, Any]:
+    run = get_run(run_id)
+    result = result_for(run, step_id)
+    if run["status"] != "running" or result["status"] != "running":
+        raise HTTPException(status_code=409, detail="step is not running")
+    plan = get_plan(run["planId"])
+    step = next(item for item in plan["steps"] if item["id"] == step_id)
+    for output_path, variable in step["save"].items():
+        run["_variables"][variable] = value_at_path(payload.output, output_path)
+        if variable not in run["variables"]:
+            run["variables"].append(variable)
+            run["variables"].sort()
+    result.update(
+        {
+            "status": "completed",
+            "completedAt": store.now(),
+            "outputSummary": {"keys": sorted(payload.output)},
+            "assertions": deepcopy(payload.assertions),
+            "evidenceRefs": list(payload.evidence_refs),
+        }
+    )
+    store.run_event("execution.step.completed.v1", run, {"runId": run_id, "stepId": step_id, "channel": step["channel"], "status": "completed"})
+    if all(item["status"] == "completed" for item in run["stepResults"]):
+        run["status"] = "completed"
+        run["completedAt"] = store.now()
+        release_lease(run)
+        store.run_event("execution.run.completed.v1", run)
+    return deepcopy(result)
+
+
+@app.post("/internal/v1/runs/{run_id}/steps/{step_id}/fail")
+async def fail_step(run_id: str, step_id: str, payload: StepFail) -> Dict[str, Any]:
+    run = get_run(run_id)
+    result = result_for(run, step_id)
+    if run["status"] != "running" or result["status"] not in {"pending", "running"}:
+        raise HTTPException(status_code=409, detail="step cannot fail in its current state")
+    result.update({"status": "failed", "completedAt": store.now(), "error": {"category": payload.category, "message": payload.message}})
+    run["status"] = "failed"
+    run["completedAt"] = store.now()
+    release_lease(run)
+    store.run_event("execution.step.failed.v1", run, {"runId": run_id, "stepId": step_id, "status": "failed", "category": payload.category})
+    store.run_event("execution.run.completed.v1", run)
+    return deepcopy(result)
+
+
+@app.post("/internal/v1/runs/{run_id}/cancel")
+async def cancel_run(run_id: str) -> Dict[str, Any]:
+    run = get_run(run_id)
+    if run["status"] == "canceled":
+        return public_run(run)
+    if run["status"] in {"completed", "failed"}:
+        raise HTTPException(status_code=409, detail="completed run cannot be canceled")
+    run["status"] = "canceled"
+    run["completedAt"] = store.now()
+    for result in run["stepResults"]:
+        if result["status"] in {"pending", "running"}:
+            result["status"] = "canceled"
+            result["completedAt"] = store.now()
+    release_lease(run)
+    store.run_event("execution.run.canceled.v1", run)
+    return public_run(run)
+
+
+@app.post("/internal/v1/runs/{run_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_run(run_id: str, idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key")) -> Dict[str, Any]:
+    previous = get_run(run_id)
+    if previous["status"] not in {"failed", "canceled"}:
+        raise HTTPException(status_code=409, detail="only failed or canceled runs can be retried")
+    if not idempotency_key:
+        raise HTTPException(status_code=428, detail="Idempotency-Key is required")
+    key = f"{previous['projectId']}:{idempotency_key}"
+    if existing_id := store.idempotency.get(key):
+        return public_run(get_run(existing_id))
+    retried = create_run_record(get_plan(previous["planId"]), previous["environmentId"], {}, retry_of=run_id)
+    store.idempotency[key] = retried["id"]
+    return public_run(retried)

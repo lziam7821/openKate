@@ -14,6 +14,9 @@ client = TestClient(execution_service.app)
 
 def reset_store() -> None:
     execution_service.store.plans.clear()
+    execution_service.store.runs.clear()
+    execution_service.store.leases.clear()
+    execution_service.store.idempotency.clear()
     execution_service.store.events.clear()
 
 
