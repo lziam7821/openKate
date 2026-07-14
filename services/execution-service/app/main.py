@@ -349,6 +349,12 @@ async def run_detail(run_id: str) -> Dict[str, Any]:
     return public_run(get_run(run_id))
 
 
+@app.get("/internal/v1/runs/{run_id}/context", include_in_schema=False)
+async def run_context(run_id: str) -> Dict[str, Any]:
+    run = get_run(run_id)
+    return {"run": deepcopy(run), "plan": deepcopy(get_plan(run["planId"]))}
+
+
 @app.get("/internal/v1/runs/{run_id}/events")
 async def run_events(run_id: str, after: int = 0) -> Dict[str, Any]:
     get_run(run_id)
