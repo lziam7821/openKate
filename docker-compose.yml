@@ -160,10 +160,22 @@ services:
       OPENKATE_EXECUTOR_UI_URL: http://executor-ui:8011
       OPENKATE_EXECUTOR_API_URL: http://executor-api:8012
       OPENKATE_EXECUTOR_STATE_URL: http://executor-state:8013
+      OPENKATE_TEMPORAL_ADDRESS: temporal:7233
+      OPENKATE_TEMPORAL_NAMESPACE: openkate
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8005"]
     expose: ["8005"]
     depends_on: [execution-service, executor-ui, executor-api, executor-state]
     profiles: [executors]
+
+  temporal-baseline-worker:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/workflow-service}}
+    profiles: [executors]
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/workflow-service
+      OPENKATE_TEMPORAL_ADDRESS: temporal:7233
+      OPENKATE_TEMPORAL_NAMESPACE: openkate
+    command: ["python", "-m", "app.temporal_worker"]
+    depends_on: [temporal]
 
   temporal:
     image: temporalio/auto-setup:1.25
@@ -174,6 +186,7 @@ services:
       POSTGRES_USER: openkate
       POSTGRES_PWD: change-me
       POSTGRES_SEEDS: postgres
+      DEFAULT_NAMESPACE: openkate
     ports: ["7233:7233"]
     depends_on:
       postgres: {condition: service_healthy}

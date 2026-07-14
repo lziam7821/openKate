@@ -4,11 +4,14 @@ from typing import Any, Dict, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, status
 from openkate_common.service_app import instrument_app
+from openkate_common.temporal import PlatformHeartbeatWorkflow
 
 app = FastAPI(title="workflow-service", version="0.3.0")
 instrument_app(app, "workflow-service", ["workflow"])
 
 EXECUTION_SERVICE_URL = os.getenv("OPENKATE_EXECUTION_SERVICE_URL", "http://127.0.0.1:8004")
+TEMPORAL_ADDRESS = os.getenv("OPENKATE_TEMPORAL_ADDRESS", "127.0.0.1:7233")
+TEMPORAL_NAMESPACE = os.getenv("OPENKATE_TEMPORAL_NAMESPACE", "openkate")
 EXECUTOR_URLS = {
     "ui": os.getenv("OPENKATE_EXECUTOR_UI_URL", "http://127.0.0.1:8011"),
     "api": os.getenv("OPENKATE_EXECUTOR_API_URL", "http://127.0.0.1:8012"),
@@ -118,6 +121,19 @@ async def execute_workflow(workflow_id: str, run_id: str) -> None:
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     return {"service": "workflow-service", "status": "ready", "activeWorkflows": len(active_tasks)}
+
+
+@app.post("/internal/v1/platform-heartbeat")
+async def platform_heartbeat() -> Dict[str, str]:
+    from temporalio.client import Client
+
+    client = await Client.connect(TEMPORAL_ADDRESS, namespace=TEMPORAL_NAMESPACE)
+    return await client.execute_workflow(
+        PlatformHeartbeatWorkflow.run,
+        "workflow-service",
+        id=f"platform-heartbeat-{int(asyncio.get_running_loop().time() * 1000)}",
+        task_queue="platform-baseline",
+    )
 
 
 @app.post("/internal/v1/runs/{run_id}/execute", status_code=status.HTTP_202_ACCEPTED)
