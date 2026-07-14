@@ -33,11 +33,24 @@ services:
     environment:
       PYTHONPATH: /app/packages/python:/app/services/gateway-service
       OPENKATE_PROJECT_SERVICE_URL: http://project-service:8001
+      OPENKATE_VALIDATION_SERVICE_URL: http://validation-service:8002
+      OPENKATE_REPORT_SERVICE_URL: http://report-service:8003
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports: ["8000:8000"]
-    depends_on: [project-service]
+    depends_on: [project-service, validation-service, report-service]
+
+  validation-service:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/validation-service}}
+    environment: {PYTHONPATH: /app/packages/python:/app/services/validation-service}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+    ports: ["8002:8002"]
+
+  report-service:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/report-service}}
+    environment: {PYTHONPATH: /app/packages/python:/app/services/report-service}
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8003"]
+    ports: ["8003:8003"]
 
 volumes:
   postgres_data:
   minio_data:
-
