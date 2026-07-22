@@ -472,6 +472,15 @@ async def execution_export(run_id: str, format: str, request: Request) -> JSONRe
     return await report_request(f"/internal/v1/runs/{run_id}/exports/{format}", request)
 
 
+@app.post("/api/v1/failures/{failure_id}/classification")
+async def classify_failure(failure_id: str, request: Request) -> JSONResponse:
+    try:
+        response = await upstream(GOVERNANCE_SERVICE_URL, "POST", f"/internal/v1/failures/{failure_id}/classification", request, await request.json())
+    except httpx.HTTPError:
+        return JSONResponse(status_code=503, content={"error": {"code": "GOVERNANCE_SERVICE_UNAVAILABLE", "message": "governance service unavailable", "requestId": str(uuid4()), "details": {}}})
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
 @app.post("/api/v1/runs/{run_id}/cancel")
 async def cancel_execution_run(run_id: str, request: Request) -> JSONResponse:
     try:
