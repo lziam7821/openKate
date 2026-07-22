@@ -1,8 +1,13 @@
 import asyncio
 import os
+from datetime import timedelta
 from typing import Any, Dict, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, status
+from temporalio import activity, workflow
+from temporalio.client import Client
+from temporalio.common import RetryPolicy
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from openkate_common.service_app import instrument_app
 from openkate_common.temporal import PlatformHeartbeatWorkflow
 
@@ -18,6 +23,8 @@ EXECUTOR_URLS = {
     "state": os.getenv("OPENKATE_EXECUTOR_STATE_URL", "http://127.0.0.1:8013"),
 }
 active_tasks: Dict[str, asyncio.Task[None]] = {}
+TEMPORAL_ENABLED = os.getenv("OPENKATE_TEMPORAL_ENABLED", "false").lower() == "true"
+SCENARIO_TASK_QUEUE = "scenario-execution"
 
 
 class ScenarioExecutionWorkflow:
@@ -118,6 +125,23 @@ async def execute_workflow(workflow_id: str, run_id: str) -> None:
         active_tasks.pop(workflow_id, None)
 
 
+@activity.defn
+async def execute_scenario_run(run_id: str) -> None:
+    await ScenarioExecutionWorkflow().run(run_id)
+
+
+@workflow.defn
+class DurableScenarioExecutionWorkflow:
+    @workflow.run
+    async def run(self, run_id: str) -> None:
+        await workflow.execute_activity(
+            execute_scenario_run,
+            run_id,
+            start_to_close_timeout=timedelta(hours=1),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     return {"service": "workflow-service", "status": "ready", "activeWorkflows": len(active_tasks)}
@@ -139,6 +163,13 @@ async def platform_heartbeat() -> Dict[str, str]:
 @app.post("/internal/v1/runs/{run_id}/execute", status_code=status.HTTP_202_ACCEPTED)
 async def start_workflow(run_id: str) -> Dict[str, str]:
     workflow_id = f"workflow_{run_id}"
+    if TEMPORAL_ENABLED:
+        client = await Client.connect(TEMPORAL_ADDRESS, namespace=TEMPORAL_NAMESPACE)
+        try:
+            await client.start_workflow(DurableScenarioExecutionWorkflow.run, run_id, id=workflow_id, task_queue=SCENARIO_TASK_QUEUE)
+        except WorkflowAlreadyStartedError:
+            pass
+        return {"workflowId": workflow_id, "runId": run_id}
     existing = active_tasks.get(workflow_id)
     if existing and not existing.done():
         return {"workflowId": workflow_id, "runId": run_id}
@@ -149,7 +180,10 @@ async def start_workflow(run_id: str) -> Dict[str, str]:
 @app.post("/internal/v1/runs/{run_id}/cancel")
 async def cancel_workflow(run_id: str) -> Dict[str, str]:
     workflow_id = f"workflow_{run_id}"
-    if task := active_tasks.get(workflow_id):
+    if TEMPORAL_ENABLED:
+        client = await Client.connect(TEMPORAL_ADDRESS, namespace=TEMPORAL_NAMESPACE)
+        await client.get_workflow_handle(workflow_id).cancel()
+    elif task := active_tasks.get(workflow_id):
         task.cancel()
     async with httpx.AsyncClient(timeout=3.0) as client:
         response = await client.post(f"{EXECUTION_SERVICE_URL}/internal/v1/runs/{run_id}/cancel")

@@ -177,6 +177,7 @@ services:
       OPENKATE_EXECUTOR_STATE_URL: http://executor-state:8013
       OPENKATE_TEMPORAL_ADDRESS: temporal:7233
       OPENKATE_TEMPORAL_NAMESPACE: openkate
+      OPENKATE_TEMPORAL_ENABLED: "true"
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8005"]
     expose: ["8005"]
     depends_on: [execution-service, executor-ui, executor-api, executor-state]
@@ -189,6 +190,7 @@ services:
       PYTHONPATH: /app/packages/python:/app/services/workflow-service
       OPENKATE_TEMPORAL_ADDRESS: temporal:7233
       OPENKATE_TEMPORAL_NAMESPACE: openkate
+      OPENKATE_TEMPORAL_ENABLED: "true"
     command: ["python", "-m", "app.temporal_worker"]
     depends_on: [temporal]
 
