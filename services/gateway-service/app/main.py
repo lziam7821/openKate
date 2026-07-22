@@ -276,6 +276,16 @@ async def list_environments(project_id: str, request: Request) -> JSONResponse:
     return await project_request("GET", f"/internal/v1/projects/{project_id}/environments", request)
 
 
+@app.post("/api/v1/projects/{project_id}/device-pools", status_code=201)
+async def create_device_pool(project_id: str, request: Request) -> JSONResponse:
+    return await project_request("POST", f"/internal/v1/projects/{project_id}/device-pools", request, await request.json())
+
+
+@app.get("/api/v1/projects/{project_id}/device-pools")
+async def list_device_pools(project_id: str, request: Request) -> JSONResponse:
+    return await project_request("GET", f"/internal/v1/projects/{project_id}/device-pools", request)
+
+
 @app.patch("/api/v1/projects/{project_id}/environments/{environment_id}")
 async def update_environment(project_id: str, environment_id: str, request: Request) -> JSONResponse:
     return await project_request("PATCH", f"/internal/v1/projects/{project_id}/environments/{environment_id}", request, await request.json())

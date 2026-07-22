@@ -13,6 +13,7 @@ class ProjectStore:
         self.workspaces: Dict[str, Dict[str, str]] = {}
         self.projects: Dict[str, Dict[str, Any]] = {}
         self.environments: Dict[str, List[Dict[str, Any]]] = {}
+        self.device_pools: Dict[str, List[Dict[str, Any]]] = {}
         self.members: Dict[str, List[Dict[str, str]]] = {}
         self.audit_logs: Dict[str, List[Dict[str, str]]] = {}
         self.outbox_events: List[Dict[str, Any]] = []
@@ -208,6 +209,28 @@ class ProjectStore:
         if environments is None:
             return None
         return next((item for item in environments if item["id"] == environment_id), None)
+
+    def create_device_pool(self, project_id: str, name: str, device_ids: List[str], actor: str) -> Optional[Dict[str, Any]]:
+        if self.get_project(project_id) is None:
+            return None
+        pool = {"id": f"device_pool_{uuid4().hex[:12]}", "name": name, "deviceIds": list(dict.fromkeys(device_ids))}
+        if self.database_url is None:
+            self.device_pools.setdefault(project_id, []).append(pool)
+            self.audit(project_id, actor, "device_pool.created")
+            return pool
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute("INSERT INTO project_schema.device_pools (id, project_id, name, device_ids) VALUES (%s, %s, %s, %s) RETURNING id, name, device_ids", (pool["id"], project_id, name, pool["deviceIds"])).fetchone()
+            self._insert_audit(connection, project_id, actor, "device_pool.created")
+        return {"id": row["id"], "name": row["name"], "deviceIds": row["device_ids"]}
+
+    def list_device_pools(self, project_id: str) -> Optional[List[Dict[str, Any]]]:
+        if self.get_project(project_id) is None:
+            return None
+        if self.database_url is None:
+            return self.device_pools.get(project_id, [])
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute("SELECT id, name, device_ids FROM project_schema.device_pools WHERE project_id = %s ORDER BY created_at", (project_id,)).fetchall()
+        return [{"id": row["id"], "name": row["name"], "deviceIds": row["device_ids"]} for row in rows]
 
     def update_environment(self, project_id: str, environment_id: str, updates: Dict[str, Any], actor: str) -> Optional[Dict[str, Any]]:
         current = self.get_environment(project_id, environment_id)

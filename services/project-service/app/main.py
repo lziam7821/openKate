@@ -56,6 +56,11 @@ class MemberUpdate(BaseModel):
     role: Role
 
 
+class DevicePoolCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    device_ids: List[str] = Field(min_length=1, alias="deviceIds")
+
+
 store = ProjectStore(os.getenv("OPENKATE_PROJECT_DATABASE_URL"))
 
 
@@ -183,6 +188,24 @@ async def get_environment(project_id: str, environment_id: str, actor: str = Dep
     if environment is None:
         raise HTTPException(status_code=404, detail="environment not found")
     return environment
+
+
+@app.post("/internal/v1/projects/{project_id}/device-pools", status_code=status.HTTP_201_CREATED)
+async def create_device_pool(project_id: str, payload: DevicePoolCreate, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, object]:
+    require_project_role(project_id, actor, {"owner", "maintainer"})
+    pool = store.create_device_pool(project_id, payload.name, payload.device_ids, actor)
+    if pool is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return pool
+
+
+@app.get("/internal/v1/projects/{project_id}/device-pools")
+async def list_device_pools(project_id: str, actor: str = Depends(actor_name)) -> List[Dict[str, object]]:
+    require_project_role(project_id, actor, {"owner", "maintainer", "reviewer", "developer", "viewer"})
+    pools = store.list_device_pools(project_id)
+    if pools is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return pools
 
 
 @app.get("/internal/v1/projects/{project_id}/members")
