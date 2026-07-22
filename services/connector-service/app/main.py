@@ -4,10 +4,11 @@ import json
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from uuid import uuid4
 
 import psycopg
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from psycopg.rows import dict_row
@@ -18,6 +19,7 @@ Provider = Literal["github", "gitlab"]
 Role = Literal["owner", "maintainer", "reviewer", "developer", "viewer"]
 app = FastAPI(title="connector-service", version="0.7.0")
 instrument_app(app, "connector-service", ["connectors", "webhooks"])
+VALIDATION_SERVICE_URL = os.getenv("OPENKATE_VALIDATION_SERVICE_URL", "http://127.0.0.1:8002")
 
 
 class ConnectorCreate(BaseModel):
@@ -26,12 +28,19 @@ class ConnectorCreate(BaseModel):
     secret_ref: str = Field(alias="secretRef", min_length=1, max_length=300)
 
 
+class CiTrigger(BaseModel):
+    targets: List[str] = Field(min_length=1)
+    pull_request_id: Optional[str] = Field(default=None, alias="pullRequestId")
+    commit_sha: Optional[str] = Field(default=None, alias="commitSha")
+
+
 class ConnectorStore:
     def __init__(self, database_url: Optional[str] = None) -> None:
         self.database_url = database_url
         self.connectors: Dict[str, Dict] = {}
         self.deliveries: Dict[str, Dict] = {}
         self.pull_requests: Dict[str, Dict] = {}
+        self.ci_runs: Dict[str, Dict] = {}
 
     @staticmethod
     def now() -> str:
@@ -75,6 +84,13 @@ class ConnectorStore:
         if self.database_url:
             with psycopg.connect(self.database_url) as connection:
                 connection.execute("INSERT INTO connector_schema.pull_requests (id, connector_id, project_id, delivery_id, number, action, head_sha, payload, received_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET delivery_id = EXCLUDED.delivery_id, action = EXCLUDED.action, head_sha = EXCLUDED.head_sha, payload = EXCLUDED.payload, received_at = EXCLUDED.received_at", (item["id"], connector["id"], connector["projectId"], delivery_id, event["number"], event["action"], event["headSha"], Jsonb(event["payload"]), item["receivedAt"]))
+        return deepcopy(item)
+
+    def save_ci_run(self, item: Dict) -> Dict:
+        self.ci_runs[item["id"]] = deepcopy(item)
+        if self.database_url:
+            with psycopg.connect(self.database_url) as connection:
+                connection.execute("INSERT INTO connector_schema.ci_runs (id, project_id, pull_request_id, commit_sha, targets, scenario_ids, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET scenario_ids = EXCLUDED.scenario_ids, status = EXCLUDED.status", (item["id"], item["projectId"], item["pullRequestId"], item["commitSha"], Jsonb(item["targets"]), item["scenarioIds"], item["status"], item["createdAt"]))
         return deepcopy(item)
 
 
@@ -148,3 +164,25 @@ async def receive_webhook(provider: Provider, project_id: str, request: Request)
     event = pull_request_event(provider, payload) if accepted else None
     pull_request = store.record_pull_request(connector, delivery_id, event) if event else None
     return {"deliveryId": delivery_id, "status": "accepted" if accepted else "duplicate", "pullRequestId": pull_request["id"] if pull_request else None}
+
+
+@app.post("/internal/v1/ci/projects/{project_id}/trigger", status_code=202)
+async def trigger_ci(project_id: str, payload: CiTrigger, role: Role = Depends(require_write)) -> Dict:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(f"{VALIDATION_SERVICE_URL}/internal/v1/projects/{project_id}/scenarios/impacted", params=[("targets", target) for target in payload.targets])
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="validation service unavailable") from error
+    if response.is_error:
+        raise HTTPException(status_code=response.status_code, detail="impact analysis failed")
+    impact = response.json()
+    item = {"id": f"ci_{uuid4().hex[:12]}", "projectId": project_id, "pullRequestId": payload.pull_request_id, "commitSha": payload.commit_sha, "targets": payload.targets, "scenarioIds": [scenario["id"] for scenario in impact["items"]], "status": "needs_confirmation" if impact["fallbackRequired"] else "queued", "createdAt": store.now()}
+    return store.save_ci_run(item)
+
+
+@app.get("/internal/v1/ci/runs/{run_id}/status")
+async def ci_status(run_id: str) -> Dict:
+    item = store.ci_runs.get(run_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="ci run not found")
+    return deepcopy(item)

@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 
 
@@ -37,3 +38,20 @@ def test_webhook_rejects_invalid_signature() -> None:
     connector_service.store.connectors["connector_1"] = {"id": "connector_1", "projectId": "project-a", "provider": "gitlab", "repository": "openkate/demo", "secretRef": "vault://gitlab-demo", "createdAt": "now"}
     response = client.post("/internal/v1/webhooks/gitlab/project-a", headers={"X-Gitlab-Token": "wrong", "X-Gitlab-Event-UUID": "delivery-2"}, content=b"{}")
     assert response.status_code in {401, 503}
+
+
+def test_ci_trigger_selects_impacted_scenarios_or_requires_confirmation(monkeypatch) -> None:
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def get(self, url, params):
+            assert "project-a" in url
+            return httpx.Response(200, json={"items": [{"id": "scenario-payment"}], "fallbackRequired": False})
+
+    connector_service.store.ci_runs.clear()
+    monkeypatch.setattr(connector_service.httpx, "AsyncClient", lambda **_: Client())
+    triggered = client.post("/internal/v1/ci/projects/project-a/trigger", headers={"X-OpenKATE-Role": "maintainer"}, json={"targets": ["src/payments.py"], "pullRequestId": "pr_1", "commitSha": "abc123"})
+    assert triggered.status_code == 202
+    assert triggered.json()["status"] == "queued"
+    assert triggered.json()["scenarioIds"] == ["scenario-payment"]
+    assert client.get(f"/internal/v1/ci/runs/{triggered.json()['id']}/status").json()["commitSha"] == "abc123"
