@@ -107,6 +107,16 @@ services:
     depends_on: [postgres]
     profiles: [core]
 
+  report-event-consumer:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/report-service}}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/report-service
+      OPENKATE_REPORT_SERVICE_URL: http://report-service:8003
+      OPENKATE_VALIDATION_SERVICE_URL: http://validation-service:8002
+    command: ["python", "-m", "app.consumer"]
+    depends_on: [validation-service, report-service]
+    profiles: [core]
+
   asset-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/asset-service}}
     profiles: [core]

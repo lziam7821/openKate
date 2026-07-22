@@ -2,7 +2,6 @@ import json
 import os
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -144,18 +143,12 @@ async def project_request(method: str, path: str, request: Request, payload: Any
     return proxy_error(response) if response.is_error else proxy_success(response)
 
 
-async def index_scenario(scenario: Dict[str, Any]) -> None:
-    event = {
-        "eventId": str(uuid4()),
-        "eventType": "validation.scenario.projected.v1",
-        "projectId": scenario["projectId"],
-        "aggregateId": scenario["id"],
-        "occurredAt": datetime.now(timezone.utc).isoformat(),
-        "payload": {"scenario": scenario},
-    }
+async def index_scenario() -> None:
     try:
         async with httpx.AsyncClient(timeout=1.0) as client:
-            await client.post(f"{REPORT_SERVICE_URL}/internal/v1/events", json=event)
+            events = (await client.get(f"{VALIDATION_SERVICE_URL}/internal/v1/events")).json()
+            for event in events:
+                await client.post(f"{REPORT_SERVICE_URL}/internal/v1/events", json=event)
     except httpx.HTTPError:
         pass
 
@@ -167,8 +160,7 @@ async def scenario_write(method: str, path: str, request: Request, payload: Any 
         return JSONResponse(status_code=503, content={"error": {"code": "VALIDATION_SERVICE_UNAVAILABLE", "message": "validation service unavailable", "requestId": str(uuid4()), "details": {}}})
     if response.is_error:
         return proxy_error(response)
-    scenario = response.json()
-    await index_scenario(scenario)
+    await index_scenario()
     return proxy_success(response)
 
 

@@ -94,16 +94,28 @@ class ValidationStore:
         return datetime.now(timezone.utc).isoformat()
 
     def event(self, event_type: str, scenario: Dict[str, Any]) -> None:
-        self.events.append(
-            {
-                "eventId": str(uuid4()),
-                "eventType": event_type,
-                "projectId": scenario["projectId"],
-                "aggregateId": scenario["id"],
-                "occurredAt": self.now(),
-                "payload": {"scenario": self.public(scenario)},
-            }
-        )
+        event = {
+            "eventId": str(uuid4()), "eventType": event_type, "projectId": scenario["projectId"],
+            "aggregateId": scenario["id"], "occurredAt": self.now(), "payload": {"scenario": self.public(scenario)},
+        }
+        if self.database_url is None:
+            self.events.append(event)
+            return
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute(
+                "INSERT INTO validation_schema.event_outbox (event_id, event_type, project_id, aggregate_id, occurred_at, payload) VALUES (%s, %s, %s, %s, %s, %s)",
+                (event["eventId"], event["eventType"], event["projectId"], event["aggregateId"], event["occurredAt"], Jsonb(event["payload"])),
+            )
+
+    def events_since(self, offset: int = 0) -> List[Dict[str, Any]]:
+        if self.database_url is None:
+            return deepcopy(self.events[offset:])
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                "SELECT event_id, event_type, project_id, aggregate_id, occurred_at, payload FROM validation_schema.event_outbox ORDER BY sequence OFFSET %s",
+                (offset,),
+            ).fetchall()
+        return [{"eventId": row["event_id"], "eventType": row["event_type"], "projectId": row["project_id"], "aggregateId": row["aggregate_id"], "occurredAt": row["occurred_at"].isoformat(), "payload": row["payload"]} for row in rows]
 
     @staticmethod
     def public(scenario: Dict[str, Any]) -> Dict[str, Any]:
@@ -506,5 +518,5 @@ async def scenario_diff(scenario_id: str, from_version: int = Query(alias="fromV
 
 
 @app.get("/internal/v1/events")
-async def list_events() -> List[Dict[str, Any]]:
-    return deepcopy(store.events)
+async def list_events(offset: int = Query(default=0, ge=0)) -> List[Dict[str, Any]]:
+    return store.events_since(offset)
