@@ -14,6 +14,7 @@ class ProjectStore:
         self.projects: Dict[str, Dict[str, Any]] = {}
         self.environments: Dict[str, List[Dict[str, Any]]] = {}
         self.device_pools: Dict[str, List[Dict[str, Any]]] = {}
+        self.connection_profiles: Dict[str, List[Dict[str, Any]]] = {}
         self.members: Dict[str, List[Dict[str, str]]] = {}
         self.audit_logs: Dict[str, List[Dict[str, str]]] = {}
         self.outbox_events: List[Dict[str, Any]] = []
@@ -231,6 +232,32 @@ class ProjectStore:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute("SELECT id, name, device_ids FROM project_schema.device_pools WHERE project_id = %s ORDER BY created_at", (project_id,)).fetchall()
         return [{"id": row["id"], "name": row["name"], "deviceIds": row["device_ids"]} for row in rows]
+
+    def create_connection_profile(self, project_id: str, payload: Dict[str, Any], actor: str) -> Optional[Dict[str, Any]]:
+        if self.get_project(project_id) is None:
+            return None
+        profile = {"id": f"connection_{uuid4().hex[:12]}", "name": payload["name"], "kind": payload["kind"], "endpoint": payload["endpoint"], "secretRef": payload.get("secretRef")}
+        if self.database_url is None:
+            self.connection_profiles.setdefault(project_id, []).append(profile)
+            self.audit(project_id, actor, "connection_profile.created")
+            return profile
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute("INSERT INTO project_schema.connection_profiles (id, project_id, name, kind, endpoint, secret_ref) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id, name, kind, endpoint, secret_ref", (profile["id"], project_id, profile["name"], profile["kind"], profile["endpoint"], profile["secretRef"])).fetchone()
+            self._insert_audit(connection, project_id, actor, "connection_profile.created")
+        return {"id": row["id"], "name": row["name"], "kind": row["kind"], "endpoint": row["endpoint"], "secretRef": row["secret_ref"]}
+
+    def list_connection_profiles(self, project_id: str) -> Optional[List[Dict[str, Any]]]:
+        if self.get_project(project_id) is None:
+            return None
+        if self.database_url is None:
+            return self.connection_profiles.get(project_id, [])
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute("SELECT id, name, kind, endpoint, secret_ref FROM project_schema.connection_profiles WHERE project_id = %s ORDER BY created_at", (project_id,)).fetchall()
+        return [{"id": row["id"], "name": row["name"], "kind": row["kind"], "endpoint": row["endpoint"], "secretRef": row["secret_ref"]} for row in rows]
+
+    def get_connection_profile(self, project_id: str, profile_id: str) -> Optional[Dict[str, Any]]:
+        profiles = self.list_connection_profiles(project_id)
+        return next((profile for profile in profiles or [] if profile["id"] == profile_id), None)
 
     def update_environment(self, project_id: str, environment_id: str, updates: Dict[str, Any], actor: str) -> Optional[Dict[str, Any]]:
         current = self.get_environment(project_id, environment_id)

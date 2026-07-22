@@ -286,6 +286,21 @@ async def list_device_pools(project_id: str, request: Request) -> JSONResponse:
     return await project_request("GET", f"/internal/v1/projects/{project_id}/device-pools", request)
 
 
+@app.post("/api/v1/projects/{project_id}/connection-profiles", status_code=201)
+async def create_connection_profile(project_id: str, request: Request) -> JSONResponse:
+    return await project_request("POST", f"/internal/v1/projects/{project_id}/connection-profiles", request, await request.json())
+
+
+@app.get("/api/v1/projects/{project_id}/connection-profiles")
+async def list_connection_profiles(project_id: str, request: Request) -> JSONResponse:
+    return await project_request("GET", f"/internal/v1/projects/{project_id}/connection-profiles", request)
+
+
+@app.post("/api/v1/projects/{project_id}/connection-profiles/{profile_id}/test")
+async def test_connection_profile(project_id: str, profile_id: str, request: Request) -> JSONResponse:
+    return await project_request("POST", f"/internal/v1/projects/{project_id}/connection-profiles/{profile_id}/test", request)
+
+
 @app.patch("/api/v1/projects/{project_id}/environments/{environment_id}")
 async def update_environment(project_id: str, environment_id: str, request: Request) -> JSONResponse:
     return await project_request("PATCH", f"/internal/v1/projects/{project_id}/environments/{environment_id}", request, await request.json())

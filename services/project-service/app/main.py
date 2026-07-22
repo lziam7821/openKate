@@ -1,6 +1,7 @@
 import os
 from typing import Dict, List, Literal, Optional
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -59,6 +60,13 @@ class MemberUpdate(BaseModel):
 class DevicePoolCreate(BaseModel):
     name: str = Field(min_length=2, max_length=100)
     device_ids: List[str] = Field(min_length=1, alias="deviceIds")
+
+
+class ConnectionProfileCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    kind: Literal["http", "postgres", "redis", "log", "trace", "external"]
+    endpoint: str = Field(min_length=3, max_length=500)
+    secret_ref: Optional[str] = Field(default=None, alias="secretRef")
 
 
 store = ProjectStore(os.getenv("OPENKATE_PROJECT_DATABASE_URL"))
@@ -206,6 +214,40 @@ async def list_device_pools(project_id: str, actor: str = Depends(actor_name)) -
     if pools is None:
         raise HTTPException(status_code=404, detail="project not found")
     return pools
+
+
+@app.post("/internal/v1/projects/{project_id}/connection-profiles", status_code=status.HTTP_201_CREATED)
+async def create_connection_profile(project_id: str, payload: ConnectionProfileCreate, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, object]:
+    require_project_role(project_id, actor, {"owner", "maintainer"})
+    profile = store.create_connection_profile(project_id, payload.model_dump(by_alias=True), actor)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return profile
+
+
+@app.get("/internal/v1/projects/{project_id}/connection-profiles")
+async def list_connection_profiles(project_id: str, actor: str = Depends(actor_name)) -> List[Dict[str, object]]:
+    require_project_role(project_id, actor, {"owner", "maintainer", "reviewer", "developer", "viewer"})
+    profiles = store.list_connection_profiles(project_id)
+    if profiles is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return profiles
+
+
+@app.post("/internal/v1/projects/{project_id}/connection-profiles/{profile_id}/test")
+async def test_connection_profile(project_id: str, profile_id: str, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, object]:
+    require_project_role(project_id, actor, {"owner", "maintainer"})
+    profile = store.get_connection_profile(project_id, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="connection profile not found")
+    if profile["kind"] not in {"http", "log", "trace", "external"}:
+        raise HTTPException(status_code=422, detail="active test is only supported for HTTP connection profiles")
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(profile["endpoint"])
+    except httpx.HTTPError:
+        return {"id": profile_id, "reachable": False, "statusCode": None}
+    return {"id": profile_id, "reachable": response.is_success, "statusCode": response.status_code}
 
 
 @app.get("/internal/v1/projects/{project_id}/members")

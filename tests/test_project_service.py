@@ -61,6 +61,15 @@ def test_owner_can_manage_project_device_pools() -> None:
     assert client.get(f"/internal/v1/projects/{project['id']}/device-pools").json()[0]["name"] == "Android"
 
 
+def test_owner_can_manage_connection_profiles_without_exposing_secrets() -> None:
+    headers = {"X-OpenKATE-Role": "owner"}
+    project = client.post("/internal/v1/workspaces/workspace_demo/projects", headers=headers, json={"name": "Connections"}).json()
+    created = client.post(f"/internal/v1/projects/{project['id']}/connection-profiles", headers=headers, json={"name": "Trace API", "kind": "trace", "endpoint": "https://trace.test/api", "secretRef": "vault://trace/token"})
+    assert created.status_code == 201
+    assert created.json()["secretRef"] == "vault://trace/token"
+    assert "token-value" not in str(client.get(f"/internal/v1/projects/{project['id']}/connection-profiles").json())
+
+
 def test_owner_can_create_workspace_and_manage_project_members_with_actor_audit() -> None:
     headers = {"X-OpenKATE-Role": "owner", "X-OpenKATE-Actor": "owner-ada"}
     workspace = client.post("/internal/v1/workspaces", headers=headers, json={"name": "Payments"})
