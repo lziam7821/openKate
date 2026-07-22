@@ -69,6 +69,11 @@ class ConnectionProfileCreate(BaseModel):
     secret_ref: Optional[str] = Field(default=None, alias="secretRef")
 
 
+class QualityPolicyCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    thresholds: Dict[str, float] = Field(default_factory=dict)
+
+
 store = ProjectStore(os.getenv("OPENKATE_PROJECT_DATABASE_URL"))
 
 
@@ -248,6 +253,15 @@ async def test_connection_profile(project_id: str, profile_id: str, role: Role =
     except httpx.HTTPError:
         return {"id": profile_id, "reachable": False, "statusCode": None}
     return {"id": profile_id, "reachable": response.is_success, "statusCode": response.status_code}
+
+
+@app.post("/internal/v1/projects/{project_id}/quality-policies", status_code=status.HTTP_201_CREATED)
+async def create_quality_policy(project_id: str, payload: QualityPolicyCreate, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, object]:
+    require_project_role(project_id, actor, {"owner", "maintainer"})
+    policy = store.create_quality_policy(project_id, payload.name, payload.thresholds, actor)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return policy
 
 
 @app.get("/internal/v1/projects/{project_id}/members")

@@ -301,6 +301,11 @@ async def test_connection_profile(project_id: str, profile_id: str, request: Req
     return await project_request("POST", f"/internal/v1/projects/{project_id}/connection-profiles/{profile_id}/test", request)
 
 
+@app.post("/api/v1/projects/{project_id}/quality-policies", status_code=201)
+async def create_quality_policy(project_id: str, request: Request) -> JSONResponse:
+    return await project_request("POST", f"/internal/v1/projects/{project_id}/quality-policies", request, await request.json())
+
+
 @app.patch("/api/v1/projects/{project_id}/environments/{environment_id}")
 async def update_environment(project_id: str, environment_id: str, request: Request) -> JSONResponse:
     return await project_request("PATCH", f"/internal/v1/projects/{project_id}/environments/{environment_id}", request, await request.json())

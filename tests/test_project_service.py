@@ -70,6 +70,14 @@ def test_owner_can_manage_connection_profiles_without_exposing_secrets() -> None
     assert "token-value" not in str(client.get(f"/internal/v1/projects/{project['id']}/connection-profiles").json())
 
 
+def test_owner_can_create_quality_policy() -> None:
+    headers = {"X-OpenKATE-Role": "owner"}
+    project = client.post("/internal/v1/workspaces/workspace_demo/projects", headers=headers, json={"name": "Quality"}).json()
+    response = client.post(f"/internal/v1/projects/{project['id']}/quality-policies", headers=headers, json={"name": "Checkout SLO", "thresholds": {"http_req_duration.p95": 500}})
+    assert response.status_code == 201
+    assert response.json()["thresholds"]["http_req_duration.p95"] == 500
+
+
 def test_owner_can_create_workspace_and_manage_project_members_with_actor_audit() -> None:
     headers = {"X-OpenKATE-Role": "owner", "X-OpenKATE-Actor": "owner-ada"}
     workspace = client.post("/internal/v1/workspaces", headers=headers, json={"name": "Payments"})

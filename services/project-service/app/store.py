@@ -15,6 +15,7 @@ class ProjectStore:
         self.environments: Dict[str, List[Dict[str, Any]]] = {}
         self.device_pools: Dict[str, List[Dict[str, Any]]] = {}
         self.connection_profiles: Dict[str, List[Dict[str, Any]]] = {}
+        self.quality_policies: Dict[str, List[Dict[str, Any]]] = {}
         self.members: Dict[str, List[Dict[str, str]]] = {}
         self.audit_logs: Dict[str, List[Dict[str, str]]] = {}
         self.outbox_events: List[Dict[str, Any]] = []
@@ -258,6 +259,19 @@ class ProjectStore:
     def get_connection_profile(self, project_id: str, profile_id: str) -> Optional[Dict[str, Any]]:
         profiles = self.list_connection_profiles(project_id)
         return next((profile for profile in profiles or [] if profile["id"] == profile_id), None)
+
+    def create_quality_policy(self, project_id: str, name: str, thresholds: Dict[str, float], actor: str) -> Optional[Dict[str, Any]]:
+        if self.get_project(project_id) is None:
+            return None
+        policy = {"id": f"quality_policy_{uuid4().hex[:12]}", "name": name, "thresholds": thresholds}
+        if self.database_url is None:
+            self.quality_policies.setdefault(project_id, []).append(policy)
+            self.audit(project_id, actor, "quality_policy.created")
+            return policy
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute("INSERT INTO project_schema.quality_policies (id, project_id, name, thresholds) VALUES (%s, %s, %s, %s) RETURNING id, name, thresholds", (policy["id"], project_id, name, Jsonb(thresholds))).fetchone()
+            self._insert_audit(connection, project_id, actor, "quality_policy.created")
+        return {"id": row["id"], "name": row["name"], "thresholds": row["thresholds"]}
 
     def update_environment(self, project_id: str, environment_id: str, updates: Dict[str, Any], actor: str) -> Optional[Dict[str, Any]]:
         current = self.get_environment(project_id, environment_id)

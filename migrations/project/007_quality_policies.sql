@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS project_schema.quality_policies (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project_schema.projects(id) ON DELETE CASCADE, name TEXT NOT NULL, thresholds JSONB NOT NULL DEFAULT '{}');
