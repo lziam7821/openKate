@@ -481,6 +481,27 @@ async def classify_failure(failure_id: str, request: Request) -> JSONResponse:
     return proxy_error(response) if response.is_error else proxy_success(response)
 
 
+@app.post("/api/v1/projects/{project_id}/assets", status_code=201)
+async def import_asset(project_id: str, request: Request) -> JSONResponse:
+    try:
+        response = await upstream(ASSET_SERVICE_URL, "POST", f"/internal/v1/projects/{project_id}/assets", request, await request.json())
+    except httpx.HTTPError:
+        return JSONResponse(status_code=503, content={"error": {"code": "ASSET_SERVICE_UNAVAILABLE", "message": "asset service unavailable", "requestId": str(uuid4()), "details": {}}})
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
+@app.post("/api/v1/assets/{asset_id}/parse")
+async def parse_asset(asset_id: str, request: Request) -> JSONResponse:
+    response = await upstream(ASSET_SERVICE_URL, "POST", f"/internal/v1/assets/{asset_id}/parse", request)
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
+@app.get("/api/v1/assets/{asset_id}")
+async def asset_detail(asset_id: str, request: Request) -> JSONResponse:
+    response = await upstream(ASSET_SERVICE_URL, "GET", f"/internal/v1/assets/{asset_id}/document", request)
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
 @app.post("/api/v1/runs/{run_id}/cancel")
 async def cancel_execution_run(run_id: str, request: Request) -> JSONResponse:
     try:
