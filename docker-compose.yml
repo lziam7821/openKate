@@ -81,6 +81,7 @@ services:
       OPENKATE_EXECUTOR_STATE_URL: http://executor-state:8013
       OPENKATE_EXECUTOR_MOBILE_URL: http://executor-mobile:8014
       OPENKATE_EXECUTOR_EXTERNAL_URL: http://executor-external:8015
+      OPENKATE_EXECUTOR_QUALITY_URL: http://executor-quality:8016
       OPENKATE_JWT_SECRET: ${OPENKATE_JWT_SECRET:-local-development-secret-change-before-production}
       OPENKATE_OIDC_ISSUER: ${OPENKATE_OIDC_ISSUER:-}
       OPENKATE_OIDC_AUDIENCE: ${OPENKATE_OIDC_AUDIENCE:-}
@@ -187,6 +188,7 @@ services:
       OPENKATE_EXECUTOR_STATE_URL: http://executor-state:8013
       OPENKATE_EXECUTOR_MOBILE_URL: http://executor-mobile:8014
       OPENKATE_EXECUTOR_EXTERNAL_URL: http://executor-external:8015
+      OPENKATE_EXECUTOR_QUALITY_URL: http://executor-quality:8016
       OPENKATE_TEMPORAL_ADDRESS: temporal:7233
       OPENKATE_TEMPORAL_NAMESPACE: openkate
       OPENKATE_TEMPORAL_ENABLED: "true"
@@ -270,6 +272,17 @@ services:
       OPENKATE_ASSET_SERVICE_URL: http://asset-service:8006
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8015"]
     expose: ["8015"]
+    profiles: [executors]
+
+  executor-quality:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: workers/executor-quality}}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/workers/executor-quality
+      OPENKATE_QUALITY_SCRIPT_DIR: /quality-scripts
+      OPENKATE_ASSET_SERVICE_URL: http://asset-service:8006
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8016"]
+    expose: ["8016"]
+    volumes: ["./quality-scripts:/quality-scripts:ro"]
     profiles: [executors]
 
   web:

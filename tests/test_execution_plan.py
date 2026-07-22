@@ -127,7 +127,7 @@ def test_capability_discovery_registers_workers_and_missing_channels(monkeypatch
     assert items["api"]["worker"] == "executor-api"
     assert items["api"]["sdkVersion"] == "1.0"
     assert items["mobile"]["worker"] == "executor-mobile"
-    assert items["quality"]["status"] == "unavailable"
+    assert items["quality"]["worker"] == "executor-quality"
 
 
 def test_capability_discovery_rejects_incompatible_worker_contract(monkeypatch) -> None:

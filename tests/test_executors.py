@@ -28,6 +28,7 @@ state_executor = load("state_executor", "workers/executor-state/app/main.py")
 ui_executor = load("ui_executor", "workers/executor-ui/app/main.py")
 mobile_executor = load("mobile_executor", "workers/executor-mobile/app/main.py")
 external_executor = load("external_executor", "workers/executor-external/app/main.py")
+quality_executor = load("quality_executor", "workers/executor-quality/app/main.py")
 
 
 def test_api_executor_calls_real_http_transport_transfers_variable_and_redacts_evidence() -> None:
@@ -274,3 +275,18 @@ def test_external_executor_waits_for_callback_and_exposes_test_data() -> None:
 
     data = ExecutorRequest.model_validate({"runId": "run-external", "stepId": "data", "action": "data", "input": {"data": {"sku": "SKU-1"}}})
     assert asyncio.run(external_executor.execute_external(data)).output == {"sku": "SKU-1"}
+
+
+def test_quality_executor_parses_k6_summary_and_enforces_script_directory(monkeypatch, tmp_path) -> None:
+    script = tmp_path / "checkout.js"
+    script.write_text("export default function () {}")
+    monkeypatch.setenv("OPENKATE_QUALITY_SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(quality_executor, "binary", lambda _: "k6")
+
+    def run(command, **kwargs):
+        Path(command[3]).write_text(json.dumps({"metrics": {"http_req_duration": {"avg": 120}}}))
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    request = ExecutorRequest.model_validate({"runId": "run-quality", "stepId": "load", "action": "k6", "input": {"script": "checkout.js", "assertions": [{"path": "metrics.http_req_duration.avg", "operator": "equals", "expected": 120}]}})
+    result = quality_executor.execute_quality(request, run)
+    assert result.environment["executor"] == "quality.k6"
