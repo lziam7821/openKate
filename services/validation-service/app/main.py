@@ -186,6 +186,25 @@ class ValidationStore:
                     "INSERT INTO validation_schema.scenario_versions (scenario_id, version, content, created_by, created_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (scenario_id, version) DO UPDATE SET content = EXCLUDED.content",
                     (scenario["id"], version["version"], Jsonb(version), version["updatedBy"], version["updatedAt"]),
                 )
+            connection.execute("DELETE FROM validation_schema.risks WHERE scenario_id = %s", (scenario["id"],))
+            connection.execute("DELETE FROM validation_schema.evidence_points WHERE scenario_id = %s", (scenario["id"],))
+            connection.execute("DELETE FROM validation_schema.reviews WHERE scenario_id = %s", (scenario["id"],))
+            for version in scenario["versions"]:
+                for index, risk in enumerate(version.get("risks", [])):
+                    connection.execute(
+                        "INSERT INTO validation_schema.risks (id, scenario_id, scenario_version, title, description, level) VALUES (%s, %s, %s, %s, %s, %s)",
+                        (f"{scenario['id']}:v{version['version']}:risk:{index}", scenario["id"], version["version"], risk["title"], risk.get("description", ""), risk["level"]),
+                    )
+                for index, evidence in enumerate(version.get("evidencePoints", [])):
+                    connection.execute(
+                        "INSERT INTO validation_schema.evidence_points (id, scenario_id, scenario_version, channel, target, observation, assertions, required) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (f"{scenario['id']}:v{version['version']}:evidence:{index}", scenario["id"], version["version"], evidence["channel"], evidence["target"], evidence["observation"], Jsonb(evidence["assertions"]), evidence.get("required", True)),
+                    )
+            for review in scenario["reviews"]:
+                connection.execute(
+                    "INSERT INTO validation_schema.reviews (id, scenario_id, scenario_version, author, content, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (review["id"], scenario["id"], review.get("scenarioVersion", scenario["version"]), review["author"], review["content"], review["status"], review["createdAt"]),
+                )
 
     def ready(self) -> bool:
         if self.database_url is None:
@@ -383,7 +402,7 @@ async def create_review(
     previous_revision = scenario["revision"]
     if scenario["status"] != "in_review":
         raise HTTPException(status_code=409, detail="reviews require a scenario in review")
-    review = {"id": f"review_{uuid4().hex[:12]}", "author": actor, "content": payload.content, "status": payload.status, "createdAt": store.now()}
+    review = {"id": f"review_{uuid4().hex[:12]}", "author": actor, "content": payload.content, "status": payload.status, "createdAt": store.now(), "scenarioVersion": scenario["version"]}
     scenario["reviews"].append(review)
     touch(scenario, actor, "scenario.review.created")
     store.save(scenario, previous_revision)
@@ -449,7 +468,7 @@ async def reject_scenario(
     if scenario["status"] != "in_review":
         raise HTTPException(status_code=409, detail="only scenarios in review can be rejected")
     scenario["status"] = "rejected"
-    scenario["reviews"].append({"id": f"review_{uuid4().hex[:12]}", "author": actor, "content": payload.reason, "status": "open", "createdAt": store.now()})
+    scenario["reviews"].append({"id": f"review_{uuid4().hex[:12]}", "author": actor, "content": payload.reason, "status": "open", "createdAt": store.now(), "scenarioVersion": scenario["version"]})
     touch(scenario, actor, "scenario.rejected")
     store.save(scenario, previous_revision)
     store.event("validation.scenario.rejected.v1", scenario)

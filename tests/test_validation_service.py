@@ -60,6 +60,7 @@ def test_scenario_review_reject_version_and_approve_flow() -> None:
     )
     assert comment.status_code == 201
     assert comment.json()["reviews"][0]["author"] == "reviewer-lin"
+    assert comment.json()["reviews"][0]["scenarioVersion"] == 1
 
     rejected = client.post(
         f"/internal/v1/scenarios/{scenario_id}/reject",
