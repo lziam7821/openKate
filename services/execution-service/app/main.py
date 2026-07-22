@@ -633,6 +633,14 @@ async def fail_step(run_id: str, step_id: str, payload: StepFail) -> Dict[str, A
     return deepcopy(result)
 
 
+@app.post("/internal/v1/runs/{run_id}/steps/{step_id}/compensated")
+async def compensated_step(run_id: str, step_id: str) -> Dict[str, str]:
+    run = get_run(run_id)
+    result_for(run, step_id)
+    store.run_event("execution.step.compensated.v1", run, {"runId": run_id, "stepId": step_id})
+    return {"runId": run_id, "stepId": step_id, "status": "compensated"}
+
+
 @app.post("/internal/v1/runs/{run_id}/cancel")
 async def cancel_run(run_id: str) -> Dict[str, Any]:
     run = get_run(run_id)

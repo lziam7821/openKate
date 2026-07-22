@@ -141,3 +141,19 @@ def test_workflow_executes_independent_steps_in_parallel() -> None:
     asyncio.run(client.aclose())
     assert set(timeline[:2]) == {"start:left", "start:right"}
     assert state["run"]["status"] == "completed"
+
+
+def test_workflow_compensates_completed_steps_before_failure() -> None:
+    state = context()
+    state["plan"]["steps"][0]["compensation"] = "undo_checkout"
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    asyncio.run(workflow_service.ScenarioExecutionWorkflow(client)._abort("run-1", "pay_order", "executor_error", "failed", state["run"], state["plan"], client))
+    asyncio.run(client.aclose())
+    assert any(path.endswith("/compensated") for path in calls)
+    assert any(path.endswith("/execute") for path in calls)
