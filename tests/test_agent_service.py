@@ -38,3 +38,11 @@ def test_accepting_a_reviewed_generation_imports_a_draft_scenario(monkeypatch) -
     accepted = asyncio.run(agent_service.accept_generation("generation-1"))
     assert accepted["status"] == "accepted"
     assert accepted["scenarioId"] == "scenario-generated"
+
+
+def test_knowledge_lookup_is_project_scoped_and_snapshot_is_stable() -> None:
+    agent_service.knowledge.clear()
+    agent_service.knowledge["project-a"] = [{"id": "knowledge-a", "projectId": "project-a", "title": "Payment timeout", "content": "Retry payment callback", "source": "incident-1"}]
+    agent_service.knowledge["project-b"] = [{"id": "knowledge-b", "projectId": "project-b", "title": "Payment timeout", "content": "Other tenant", "source": "incident-2"}]
+    result = asyncio.run(agent_service.list_knowledge("project-a", "payment callback"))
+    assert result["snapshot"] == {"projectId": "project-a", "ids": ["knowledge-a"]}

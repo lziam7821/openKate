@@ -516,6 +516,16 @@ async def create_generation(project_id: str, request: Request) -> JSONResponse:
     return await generation_request("POST", f"/internal/v1/projects/{project_id}/scenario-generations", request)
 
 
+@app.post("/api/v1/projects/{project_id}/knowledge/imports", status_code=201)
+async def import_knowledge(project_id: str, request: Request) -> JSONResponse:
+    return await generation_request("POST", f"/internal/v1/projects/{project_id}/knowledge/imports", request)
+
+
+@app.get("/api/v1/projects/{project_id}/knowledge")
+async def list_knowledge(project_id: str, request: Request) -> JSONResponse:
+    return await generation_request("GET", f"/internal/v1/projects/{project_id}/knowledge", request)
+
+
 @app.get("/api/v1/scenario-generations/{task_id}")
 async def generation_detail(task_id: str, request: Request) -> JSONResponse:
     return await generation_request("GET", f"/internal/v1/scenario-generations/{task_id}", request)
