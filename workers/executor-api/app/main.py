@@ -40,7 +40,7 @@ async def execute_api(request: ExecutorRequest, transport: Optional[httpx.AsyncB
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"worker": "executor-api", "status": "ready", "capabilities": ["api.http"]}
+    return {"worker": "executor-api", "status": "ready", "capabilities": ["api.http"], "sdkVersion": "1.0", "contractVersion": "1"}
 
 
 @app.post("/execute", response_model=ExecutorResult)

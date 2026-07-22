@@ -368,6 +368,11 @@ async def scenario_diff(scenario_id: str, request: Request) -> JSONResponse:
     return proxy_error(response) if response.is_error else proxy_success(response)
 
 
+@app.get("/api/v1/projects/{project_id}/executor-capabilities")
+async def executor_capabilities(project_id: str, request: Request) -> JSONResponse:
+    return await execution_upstream("GET", f"/internal/v1/projects/{project_id}/executor-capabilities", request)
+
+
 @app.post("/api/v1/scenarios/{scenario_id}/execution-plans", status_code=201)
 async def create_execution_plan(scenario_id: str, request: Request) -> JSONResponse:
     try:

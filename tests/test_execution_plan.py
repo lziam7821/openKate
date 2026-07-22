@@ -18,6 +18,15 @@ def reset_store() -> None:
     execution_service.store.leases.clear()
     execution_service.store.idempotency.clear()
     execution_service.store.events.clear()
+    execution_service.store.capabilities.clear()
+    execution_service.store.save_capabilities(
+        "project_checkout",
+        [
+            {"channel": "ui", "worker": "executor-ui", "capabilities": ["ui.web"], "sdkVersion": "1.0", "contractVersion": "1", "status": "ready", "observedAt": execution_service.store.now()},
+            {"channel": "api", "worker": "executor-api", "capabilities": ["api.http"], "sdkVersion": "1.0", "contractVersion": "1", "status": "ready", "observedAt": execution_service.store.now()},
+            {"channel": "state", "worker": "executor-state", "capabilities": ["state.postgresql.read_only"], "sdkVersion": "1.0", "contractVersion": "1", "status": "ready", "observedAt": execution_service.store.now()},
+        ],
+    )
 
 
 def valid_plan() -> dict:
@@ -78,3 +87,43 @@ def test_plan_update_uses_optimistic_lock_and_revalidates_dag() -> None:
     assert updated.status_code == 200
     assert updated.json()["version"] == 2
     assert updated.json()["timeoutMs"] == 45000
+
+
+def test_plan_rejects_channel_without_ready_executor() -> None:
+    reset_store()
+    payload = valid_plan()
+    payload["steps"][0]["channel"] = "mobile"
+    response = create(payload)
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "EXECUTOR_CAPABILITY_UNAVAILABLE",
+        "message": "executor capability is unavailable",
+        "channels": ["mobile"],
+    }
+
+
+def test_capability_discovery_registers_workers_and_missing_channels(monkeypatch) -> None:
+    reset_store()
+    execution_service.store.capabilities.clear()
+
+    class WorkerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url):
+            channel = next(name for name, base_url in execution_service.EXECUTOR_URLS.items() if url.startswith(base_url))
+            return __import__("httpx").Response(200, json={"worker": f"executor-{channel}", "status": "ready", "capabilities": [f"{channel}.test"], "sdkVersion": "1.0", "contractVersion": "1"})
+
+    monkeypatch.setattr(execution_service.httpx, "AsyncClient", WorkerClient)
+    response = client.get("/internal/v1/projects/project_capabilities/executor-capabilities")
+    assert response.status_code == 200
+    items = {item["channel"]: item for item in response.json()["items"]}
+    assert items["api"]["worker"] == "executor-api"
+    assert items["api"]["sdkVersion"] == "1.0"
+    assert items["mobile"]["status"] == "unavailable"

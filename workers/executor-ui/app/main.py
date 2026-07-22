@@ -65,7 +65,7 @@ async def execute_ui(request: ExecutorRequest) -> ExecutorResult:
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"worker": "executor-ui", "status": "ready", "capabilities": ["ui.web"]}
+    return {"worker": "executor-ui", "status": "ready", "capabilities": ["ui.web"], "sdkVersion": "1.0", "contractVersion": "1"}
 
 
 @app.post("/execute", response_model=ExecutorResult)

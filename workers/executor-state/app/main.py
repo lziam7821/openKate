@@ -56,7 +56,7 @@ def execute_state(request: ExecutorRequest, connection_factory: Optional[Callabl
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only"]}
+    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only"], "sdkVersion": "1.0", "contractVersion": "1"}
 
 
 @app.post("/execute", response_model=ExecutorResult)

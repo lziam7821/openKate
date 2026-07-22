@@ -104,6 +104,21 @@ def test_gateway_uses_verified_identity_for_public_project_routes(monkeypatch) -
     assert all(call[2]["id"] == "user-42" and call[2]["role"] == "owner" for call in calls)
 
 
+def test_gateway_exposes_executor_capabilities(monkeypatch) -> None:
+    configure_auth(monkeypatch)
+
+    async def fake_upstream(url, method, path, request, payload=None, extra_headers=None):
+        assert url == gateway_service.EXECUTION_SERVICE_URL
+        assert method == "GET"
+        assert path == "/internal/v1/projects/project-1/executor-capabilities"
+        return httpx.Response(200, json={"projectId": "project-1", "items": []})
+
+    monkeypatch.setattr(gateway_service, "upstream", fake_upstream)
+    response = client.get("/api/v1/projects/project-1/executor-capabilities", headers=auth_headers())
+    assert response.status_code == 200
+    assert response.json()["projectId"] == "project-1"
+
+
 def test_failed_workflow_start_cancels_run_and_releases_lease(monkeypatch) -> None:
     configure_auth(monkeypatch)
     calls: list[tuple[str, str]] = []

@@ -20,6 +20,7 @@ Channel = Literal["ui", "api", "state", "mobile", "external", "quality"]
 TEMPLATE_PATTERN = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*}}")
 SENSITIVE_PARTS = {"authorization", "cookie", "password", "secret", "token", "api_key", "apikey", "access_token", "refresh_token"}
 EXECUTOR_URLS = {"ui": os.getenv("OPENKATE_EXECUTOR_UI_URL", "http://127.0.0.1:8011"), "api": os.getenv("OPENKATE_EXECUTOR_API_URL", "http://127.0.0.1:8012"), "state": os.getenv("OPENKATE_EXECUTOR_STATE_URL", "http://127.0.0.1:8013")}
+CHANNELS = ("ui", "api", "state", "mobile", "external", "quality")
 
 
 class ApiModel(BaseModel):
@@ -80,6 +81,7 @@ class ExecutionStore:
         self.leases: Dict[str, Dict[str, Any]] = {}
         self.idempotency: Dict[str, str] = {}
         self.events: List[Dict[str, Any]] = []
+        self.capabilities: Dict[tuple[str, str], Dict[str, Any]] = {}
 
     @staticmethod
     def now() -> str:
@@ -172,6 +174,26 @@ class ExecutionStore:
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute(query, params).fetchall()
         return [row["payload"] for row in rows]
+
+    def save_capabilities(self, project_id: str, items: List[Dict[str, Any]]) -> None:
+        for item in items:
+            self.capabilities[(project_id, item["channel"])] = deepcopy(item)
+        if not self.database_url:
+            return
+        with psycopg.connect(self.database_url) as connection:
+            for item in items:
+                connection.execute(
+                    "INSERT INTO execution_schema.executor_capabilities (project_id, channel, worker, capabilities, sdk_version, contract_version, status, observed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (project_id, channel) DO UPDATE SET worker = EXCLUDED.worker, capabilities = EXCLUDED.capabilities, sdk_version = EXCLUDED.sdk_version, contract_version = EXCLUDED.contract_version, status = EXCLUDED.status, observed_at = EXCLUDED.observed_at",
+                    (project_id, item["channel"], item["worker"], Jsonb(item["capabilities"]), item["sdkVersion"], item["contractVersion"], item["status"], item["observedAt"]),
+                )
+
+    def capabilities_for(self, project_id: str) -> List[Dict[str, Any]]:
+        if self.database_url and not any(key[0] == project_id for key in self.capabilities):
+            with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+                rows = connection.execute("SELECT channel, worker, capabilities, sdk_version, contract_version, status, observed_at FROM execution_schema.executor_capabilities WHERE project_id = %s", (project_id,)).fetchall()
+            for row in rows:
+                self.capabilities[(project_id, row["channel"])] = {"channel": row["channel"], "worker": row["worker"], "capabilities": row["capabilities"], "sdkVersion": row["sdk_version"], "contractVersion": row["contract_version"], "status": row["status"], "observedAt": row["observed_at"].isoformat()}
+        return [deepcopy(self.capabilities[(project_id, channel)]) for channel in CHANNELS if (project_id, channel) in self.capabilities]
 
 
 store = ExecutionStore(os.getenv("OPENKATE_EXECUTION_DATABASE_URL"))
@@ -383,24 +405,49 @@ async def health() -> Dict[str, str]:
     return {"service": "execution-service", "status": "ready"}
 
 
-@app.get("/internal/v1/projects/{project_id}/executor-capabilities")
-async def executor_capabilities(project_id: str) -> Dict[str, Any]:
+def unavailable_capability(channel: str, observed_at: str) -> Dict[str, Any]:
+    return {"channel": channel, "worker": None, "capabilities": [], "sdkVersion": None, "contractVersion": None, "status": "unavailable", "observedAt": observed_at}
+
+
+async def refresh_executor_capabilities(project_id: str) -> List[Dict[str, Any]]:
+    observed_at = store.now()
     items = []
     async with httpx.AsyncClient(timeout=1.0) as client:
         for channel, url in EXECUTOR_URLS.items():
+            item = unavailable_capability(channel, observed_at)
             try:
                 response = await client.get(f"{url}/health")
                 body = response.json() if response.is_success else {}
-                items.append({"channel": channel, "worker": body.get("worker"), "capabilities": body.get("capabilities", []), "status": "ready" if response.is_success else "unavailable"})
+                if body.get("status") == "ready" and isinstance(body.get("worker"), str) and isinstance(body.get("capabilities"), list):
+                    item.update({"worker": body["worker"], "capabilities": body["capabilities"], "sdkVersion": body.get("sdkVersion"), "contractVersion": body.get("contractVersion"), "status": "ready"})
             except httpx.HTTPError:
-                items.append({"channel": channel, "worker": None, "capabilities": [], "status": "unavailable"})
-    return {"projectId": project_id, "items": items}
+                pass
+            items.append(item)
+    items.extend(unavailable_capability(channel, observed_at) for channel in CHANNELS if channel not in EXECUTOR_URLS)
+    store.save_capabilities(project_id, items)
+    return items
+
+
+async def require_executor_capabilities(project_id: str, steps: List[ExecutionStep]) -> None:
+    items = store.capabilities_for(project_id)
+    if not items:
+        items = await refresh_executor_capabilities(project_id)
+    ready_channels = {item["channel"] for item in items if item["status"] == "ready"}
+    unavailable = sorted({step.channel for step in steps if step.channel not in ready_channels})
+    if unavailable:
+        raise HTTPException(status_code=422, detail={"code": "EXECUTOR_CAPABILITY_UNAVAILABLE", "message": "executor capability is unavailable", "channels": unavailable})
+
+
+@app.get("/internal/v1/projects/{project_id}/executor-capabilities")
+async def executor_capabilities(project_id: str) -> Dict[str, Any]:
+    return {"projectId": project_id, "items": await refresh_executor_capabilities(project_id)}
 
 
 @app.post("/internal/v1/scenarios/{scenario_id}/execution-plans", status_code=status.HTTP_201_CREATED)
 async def create_execution_plan(scenario_id: str, payload: PlanCreate, response: Response, x_project_id: str = Header(alias="X-OpenKATE-Project-Id")) -> Dict[str, Any]:
     if payload.scenario_status != "approved":
         raise HTTPException(status_code=409, detail="only approved scenarios can create execution plans")
+    await require_executor_capabilities(x_project_id, payload.steps)
     try:
         ordered_step_ids = validate_dag(payload.steps, set(payload.variables))
     except ValueError as error:
@@ -441,6 +488,7 @@ async def update_execution_plan(plan_id: str, payload: PlanUpdate, response: Res
         ordered_step_ids = validate_dag(steps, set(variables))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    await require_executor_capabilities(plan["projectId"], steps)
     if payload.steps is not None:
         plan["steps"] = [step.model_dump(by_alias=True) for step in steps]
         plan["orderedStepIds"] = ordered_step_ids
