@@ -132,6 +132,16 @@ def test_mobile_device_lease_is_exclusive_and_released() -> None:
     assert execution_service.create_run_record(plan, "staging", {}, device_id="device-1")["status"] == "running"
 
 
+def test_project_concurrent_run_quota_is_enforced(monkeypatch) -> None:
+    reset_store()
+    monkeypatch.setenv("OPENKATE_MAX_ACTIVE_RUNS_PER_PROJECT", "1")
+    plan = create_plan()
+    assert create_run(plan["id"], "quota-1").status_code == 202
+    blocked = create_run(plan["id"], "quota-2")
+    assert blocked.status_code == 429
+    assert "quota" in blocked.json()["detail"]
+
+
 def test_deadline_failure_releases_lease() -> None:
     reset_store()
     plan = create_plan()

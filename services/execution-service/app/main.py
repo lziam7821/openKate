@@ -315,6 +315,10 @@ def create_run_record(
     device_id: Optional[str] = None,
     retry_of: Optional[str] = None,
 ) -> Dict[str, Any]:
+    limit = int(os.getenv("OPENKATE_MAX_ACTIVE_RUNS_PER_PROJECT", "20"))
+    active_runs = sum(1 for item in store.runs.values() if item["projectId"] == plan["projectId"] and item["status"] == "running")
+    if active_runs >= limit:
+        raise HTTPException(status_code=429, detail="project concurrent run quota exceeded")
     now = store.now()
     run_id = f"run_{uuid4().hex[:12]}"
     lease_id = f"lease_{uuid4().hex[:12]}"
