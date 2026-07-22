@@ -11,6 +11,7 @@ from openkate_common.service_app import instrument_app
 app = FastAPI(title="agent-service", version="0.5.0")
 instrument_app(app, "agent-service", ["scenario-generation"])
 ASSET_SERVICE_URL = os.getenv("OPENKATE_ASSET_SERVICE_URL", "http://127.0.0.1:8006")
+VALIDATION_SERVICE_URL = os.getenv("OPENKATE_VALIDATION_SERVICE_URL", "http://127.0.0.1:8002")
 tasks: Dict[str, Dict[str, Any]] = {}
 
 
@@ -33,7 +34,7 @@ def draft_from_assets(project_id: str, assets: List[Dict[str, Any]]) -> Dict[str
     lines = [line.strip().lstrip("#").strip() for text in texts for line in text.splitlines() if line.strip()]
     title = lines[0] if lines else "Generated validation scenario"
     goal = lines[1] if len(lines) > 1 else title
-    return {"title": title[:200], "businessGoal": goal[:2000], "actors": [], "preconditions": [], "riskLevel": "medium", "invariants": [], "risks": [{"title": "Source coverage", "description": "Confirm all source requirements are covered.", "level": "medium"}], "evidencePoints": [], "tags": ["ai-draft"], "projectId": project_id, "citations": citations or [{"source": "inferred", "kind": "inferred"}], "quality": 0.8 if citations else 0.5}
+    return {"title": title[:200], "businessGoal": goal[:2000], "actors": ["qa"], "preconditions": [], "riskLevel": "medium", "invariants": [], "risks": [{"title": "Source coverage", "description": "Confirm all source requirements are covered.", "level": "medium"}], "evidencePoints": [], "tags": ["ai-draft"], "projectId": project_id, "citations": citations or [{"source": "inferred", "kind": "inferred"}], "quality": 0.8 if citations else 0.5}
 
 
 async def parsed_assets(asset_ids: List[str]) -> List[Dict[str, Any]]:
@@ -108,7 +109,16 @@ async def accept_generation(task_id: str) -> Dict[str, Any]:
     task = get(task_id)
     if task["status"] != "needs_review" or task["draft"]["quality"] < 0.75:
         raise HTTPException(status_code=409, detail="generation cannot be accepted")
-    task["status"] = "accepted"; task["updatedAt"] = now(); event(task, "agent.generation.accepted.v1", {})
+    draft = {key: value for key, value in task["draft"].items() if key not in {"projectId", "citations", "quality"}}
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(f"{VALIDATION_SERVICE_URL}/internal/v1/projects/{task['projectId']}/scenarios", headers={"X-OpenKATE-Role": "developer", "X-OpenKATE-Actor": "agent-review"}, json=draft)
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="validation service unavailable") from error
+    if response.is_error:
+        raise HTTPException(status_code=response.status_code, detail="generated draft could not be imported")
+    task["scenarioId"] = response.json()["id"]
+    task["status"] = "accepted"; task["updatedAt"] = now(); event(task, "agent.generation.accepted.v1", {"scenarioId": task["scenarioId"]})
     return public(task)
 
 
