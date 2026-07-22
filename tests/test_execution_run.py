@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from test_execution_plan import client, execution_service, reset_store, valid_plan
 
 
@@ -108,6 +110,26 @@ def test_configured_account_and_dataset_cannot_be_leased_twice() -> None:
         json=payload,
     )
     assert available.status_code == 202
+
+
+def test_mobile_device_lease_is_exclusive_and_released() -> None:
+    reset_store()
+    plan = valid_plan()
+    plan["steps"][0]["channel"] = "mobile"
+    plan["id"] = "plan-mobile"
+    plan["projectId"] = "project_checkout"
+    plan["scenarioId"] = "scenario_checkout"
+    plan["orderedStepIds"] = [step["id"] for step in plan["steps"]]
+    plan["variables"] = plan.get("variables", {})
+    plan["timeoutMs"] = plan["timeoutMs"]
+    plan["scenarioVersion"] = plan["scenarioVersion"]
+    first = execution_service.create_run_record(plan, "staging", {}, device_id="device-1")
+    assert execution_service.store.leases[first["leaseId"]]["deviceId"] == "device-1"
+    with pytest.raises(Exception) as error:
+        execution_service.create_run_record(plan, "staging", {}, device_id="device-1")
+    assert error.value.status_code == 409
+    execution_service.release_lease(first)
+    assert execution_service.create_run_record(plan, "staging", {}, device_id="device-1")["status"] == "running"
 
 
 def test_deadline_failure_releases_lease() -> None:

@@ -61,6 +61,7 @@ class RunCreate(ApiModel):
     allowed_hosts: List[str] = Field(default_factory=list, alias="allowedHosts")
     account_refs: List[str] = Field(default_factory=list, alias="accountRefs")
     data_set_refs: List[str] = Field(default_factory=list, alias="dataSetRefs")
+    device_id: Optional[str] = Field(default=None, alias="deviceId")
 
 
 class StepComplete(ApiModel):
@@ -119,7 +120,7 @@ class ExecutionStore:
         lease = self.leases[run["leaseId"]]
         with psycopg.connect(self.database_url) as connection:
             connection.execute("INSERT INTO execution_schema.execution_runs (id, project_id, scenario_id, scenario_version, plan_id, environment_id, status, attempt, retry_of, deadline, created_at, started_at, completed_at, document) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, completed_at = EXCLUDED.completed_at, document = EXCLUDED.document", (run["id"], run["projectId"], run["scenarioId"], run["scenarioVersion"], run["planId"], run["environmentId"], run["status"], run["attempt"], run["retryOf"], run["deadline"], run["createdAt"], run["startedAt"], run["completedAt"], Jsonb(run)))
-            connection.execute("INSERT INTO execution_schema.resource_leases (id, run_id, account_ref, data_set_ref, browser_context_id, status, acquired_at, released_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, released_at = EXCLUDED.released_at", (lease["id"], run["id"], lease["accountLeaseId"], lease["dataSetId"], lease["browserContextId"], lease["status"], lease["acquiredAt"], lease["releasedAt"]))
+            connection.execute("INSERT INTO execution_schema.resource_leases (id, run_id, account_ref, data_set_ref, device_id, browser_context_id, status, acquired_at, released_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, released_at = EXCLUDED.released_at", (lease["id"], run["id"], lease["accountLeaseId"], lease["dataSetId"], lease["deviceId"], lease["browserContextId"], lease["status"], lease["acquiredAt"], lease["releasedAt"]))
             connection.execute("DELETE FROM execution_schema.step_results WHERE run_id = %s", (run["id"],))
             connection.execute("DELETE FROM execution_schema.run_variables WHERE run_id = %s", (run["id"],))
             for result in run["stepResults"]:
@@ -141,11 +142,11 @@ class ExecutionStore:
             return self.runs.get(run_id)
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
             row = connection.execute("SELECT document FROM execution_schema.execution_runs WHERE id = %s", (run_id,)).fetchone()
-            lease = connection.execute("SELECT id, account_ref, data_set_ref, browser_context_id, status, acquired_at, released_at FROM execution_schema.resource_leases WHERE run_id = %s", (run_id,)).fetchone()
+            lease = connection.execute("SELECT id, account_ref, data_set_ref, device_id, browser_context_id, status, acquired_at, released_at FROM execution_schema.resource_leases WHERE run_id = %s", (run_id,)).fetchone()
         if row:
             self.runs[run_id] = row["document"]
             if lease:
-                self.leases[lease["id"]] = {"id": lease["id"], "runId": run_id, "accountLeaseId": lease["account_ref"], "dataSetId": lease["data_set_ref"], "browserContextId": lease["browser_context_id"], "status": lease["status"], "acquiredAt": lease["acquired_at"].isoformat(), "releasedAt": lease["released_at"].isoformat() if lease["released_at"] else None}
+                self.leases[lease["id"]] = {"id": lease["id"], "runId": run_id, "accountLeaseId": lease["account_ref"], "dataSetId": lease["data_set_ref"], "deviceId": lease["device_id"], "browserContextId": lease["browser_context_id"], "status": lease["status"], "acquiredAt": lease["acquired_at"].isoformat(), "releasedAt": lease["released_at"].isoformat() if lease["released_at"] else None}
         return self.runs.get(run_id)
 
     def idempotent_run(self, key: str) -> Optional[str]:
@@ -290,6 +291,8 @@ def release_lease(run: Dict[str, Any]) -> None:
     if lease["status"] == "active":
         lease["status"] = "released"
         lease["releasedAt"] = store.now()
+        if lease["deviceId"]:
+            store.run_event("execution.device.released.v1", run, {"runId": run["id"], "deviceId": lease["deviceId"]})
 
 
 def available_resource(field: str, configured: List[str], prefix: str) -> str:
@@ -309,6 +312,7 @@ def create_run_record(
     allowed_hosts: Optional[List[str]] = None,
     account_refs: Optional[List[str]] = None,
     data_set_refs: Optional[List[str]] = None,
+    device_id: Optional[str] = None,
     retry_of: Optional[str] = None,
 ) -> Dict[str, Any]:
     now = store.now()
@@ -316,11 +320,17 @@ def create_run_record(
     lease_id = f"lease_{uuid4().hex[:12]}"
     account_pool = account_refs or []
     data_set_pool = data_set_refs or []
+    mobile = any(step["channel"] == "mobile" for step in plan["steps"])
+    if mobile and not device_id:
+        raise HTTPException(status_code=422, detail="mobile execution requires deviceId")
+    if device_id and any(lease["status"] == "active" and lease.get("deviceId") == device_id for lease in store.leases.values()):
+        raise HTTPException(status_code=409, detail="device is already leased")
     lease = {
         "id": lease_id,
         "runId": run_id,
         "accountLeaseId": available_resource("accountLeaseId", account_pool, "account"),
         "dataSetId": available_resource("dataSetId", data_set_pool, "dataset"),
+        "deviceId": device_id if mobile else None,
         "browserContextId": f"browser_{run_id}",
         "status": "active",
         "acquiredAt": now,
@@ -356,6 +366,8 @@ def create_run_record(
     store.runs[run_id] = run
     store.run_event("execution.run.requested.v1", run)
     store.run_event("execution.run.started.v1", run)
+    if lease["deviceId"]:
+        store.run_event("execution.device.leased.v1", run, {"runId": run_id, "deviceId": lease["deviceId"]})
     return run
 
 
@@ -524,7 +536,7 @@ async def create_run(
     plan = get_plan(payload.plan_id)
     if plan["projectId"] != x_project_id or plan["scenarioId"] != scenario_id:
         raise HTTPException(status_code=404, detail="execution plan not found for scenario")
-    run = create_run_record(plan, payload.environment_id, payload.variables, payload.allowed_hosts, payload.account_refs, payload.data_set_refs)
+    run = create_run_record(plan, payload.environment_id, payload.variables, payload.allowed_hosts, payload.account_refs, payload.data_set_refs, payload.device_id)
     store.save_run(run)
     store.remember_idempotency(key, run["id"])
     return public_run(run)
@@ -656,6 +668,7 @@ async def retry_run(run_id: str, idempotency_key: Optional[str] = Header(default
         previous["allowedHosts"],
         previous["accountPool"],
         previous["dataSetPool"],
+        store.leases[previous["leaseId"]].get("deviceId"),
         retry_of=run_id,
     )
     store.save_run(retried)
