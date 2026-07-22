@@ -77,7 +77,7 @@ def test_health_catalog_covers_domain_services_and_workers() -> None:
     assert set(gateway_service.SERVICE_CATALOG) == {
         "project-service", "validation-service", "report-service", "execution-service", "workflow-service",
         "asset-service", "agent-service", "governance-service", "connector-service",
-        "executor-ui", "executor-api", "executor-state", "executor-mobile",
+        "executor-ui", "executor-api", "executor-state", "executor-mobile", "executor-external",
     }
 
 
@@ -117,6 +117,28 @@ def test_gateway_exposes_executor_capabilities(monkeypatch) -> None:
     response = client.get("/api/v1/projects/project-1/executor-capabilities", headers=auth_headers())
     assert response.status_code == 200
     assert response.json()["projectId"] == "project-1"
+
+
+def test_gateway_forwards_external_callbacks_without_bearer_token(monkeypatch) -> None:
+    class ExternalClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, json):
+            assert url == f"{gateway_service.EXECUTOR_EXTERNAL_URL}/callbacks/payment-42"
+            assert json == {"status": "PAID"}
+            return httpx.Response(202, json={"id": "callback_1"})
+
+    monkeypatch.setattr(gateway_service.httpx, "AsyncClient", ExternalClient)
+    response = client.post("/api/v1/callbacks/payment-42", json={"status": "PAID"})
+    assert response.status_code == 202
+    assert response.json()["id"] == "callback_1"
 
 
 def test_failed_workflow_start_cancels_run_and_releases_lease(monkeypatch) -> None:

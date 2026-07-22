@@ -25,6 +25,7 @@ EXECUTOR_UI_URL = os.getenv("OPENKATE_EXECUTOR_UI_URL", "http://127.0.0.1:8011")
 EXECUTOR_API_URL = os.getenv("OPENKATE_EXECUTOR_API_URL", "http://127.0.0.1:8012")
 EXECUTOR_STATE_URL = os.getenv("OPENKATE_EXECUTOR_STATE_URL", "http://127.0.0.1:8013")
 EXECUTOR_MOBILE_URL = os.getenv("OPENKATE_EXECUTOR_MOBILE_URL", "http://127.0.0.1:8014")
+EXECUTOR_EXTERNAL_URL = os.getenv("OPENKATE_EXECUTOR_EXTERNAL_URL", "http://127.0.0.1:8015")
 SERVICE_CATALOG = {
     "project-service": PROJECT_SERVICE_URL, "validation-service": VALIDATION_SERVICE_URL,
     "report-service": REPORT_SERVICE_URL, "execution-service": EXECUTION_SERVICE_URL,
@@ -33,6 +34,7 @@ SERVICE_CATALOG = {
     "connector-service": CONNECTOR_SERVICE_URL, "executor-ui": EXECUTOR_UI_URL,
     "executor-api": EXECUTOR_API_URL, "executor-state": EXECUTOR_STATE_URL,
     "executor-mobile": EXECUTOR_MOBILE_URL,
+    "executor-external": EXECUTOR_EXTERNAL_URL,
 }
 rate_windows: Dict[str, deque[float]] = defaultdict(deque)
 
@@ -70,7 +72,7 @@ def decode_access_token(token: str) -> Dict[str, Any]:
 async def authenticate(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or str(uuid4())
     request.state.request_id = request_id
-    if request.url.path.startswith("/api/v1") and not request.url.path.startswith("/api/v1/webhooks/") and request.method != "OPTIONS":
+    if request.url.path.startswith("/api/v1") and not request.url.path.startswith(("/api/v1/webhooks/", "/api/v1/callbacks/")) and request.method != "OPTIONS":
         authorization = request.headers.get("Authorization", "")
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer" or not token:
@@ -172,6 +174,17 @@ async def execution_upstream(method: str, path: str, request: Request, payload: 
         response = await upstream(EXECUTION_SERVICE_URL, method, path, request, payload, headers)
     except httpx.HTTPError:
         return JSONResponse(status_code=503, content={"error": {"code": "EXECUTION_SERVICE_UNAVAILABLE", "message": "execution service unavailable", "requestId": str(uuid4()), "details": {}}})
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
+@app.post("/api/v1/callbacks/{token}", status_code=202)
+async def receive_external_callback(token: str, request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(f"{EXECUTOR_EXTERNAL_URL}/callbacks/{token}", json=payload)
+    except (ValueError, httpx.HTTPError):
+        return JSONResponse(status_code=503, content={"error": {"code": "EXTERNAL_EXECUTOR_UNAVAILABLE", "message": "external callback endpoint is unavailable", "requestId": str(uuid4()), "details": {}}})
     return proxy_error(response) if response.is_error else proxy_success(response)
 
 

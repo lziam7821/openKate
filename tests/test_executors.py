@@ -27,6 +27,7 @@ api_executor = load("api_executor", "workers/executor-api/app/main.py")
 state_executor = load("state_executor", "workers/executor-state/app/main.py")
 ui_executor = load("ui_executor", "workers/executor-ui/app/main.py")
 mobile_executor = load("mobile_executor", "workers/executor-mobile/app/main.py")
+external_executor = load("external_executor", "workers/executor-external/app/main.py")
 
 
 def test_api_executor_calls_real_http_transport_transfers_variable_and_redacts_evidence() -> None:
@@ -262,3 +263,14 @@ def test_mobile_executor_collects_screenshot_and_page_source_with_device_actions
 def test_mobile_executor_is_unavailable_without_appium_endpoint(monkeypatch) -> None:
     monkeypatch.delenv("OPENKATE_APPIUM_URL", raising=False)
     assert asyncio.run(mobile_executor.health())["status"] == "unavailable"
+
+
+def test_external_executor_waits_for_callback_and_exposes_test_data() -> None:
+    external_executor.store.callbacks.clear()
+    external_executor.store.receive("payment-42", {"status": "PAID", "reference": "pay-42"})
+    callback = ExecutorRequest.model_validate({"runId": "run-external", "stepId": "callback", "action": "waitForCallback", "input": {"callbackToken": "payment-42", "assertions": [{"path": "callbacks.0.payload.status", "operator": "equals", "expected": "PAID"}]}})
+    result = asyncio.run(external_executor.execute_external(callback))
+    assert result.output["callbacks"][0]["payload"]["reference"] == "pay-42"
+
+    data = ExecutorRequest.model_validate({"runId": "run-external", "stepId": "data", "action": "data", "input": {"data": {"sku": "SKU-1"}}})
+    assert asyncio.run(external_executor.execute_external(data)).output == {"sku": "SKU-1"}
