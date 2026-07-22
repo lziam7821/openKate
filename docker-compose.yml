@@ -143,6 +143,7 @@ services:
     environment:
       PYTHONPATH: /app/packages/python:/app/services/governance-service
       OPENKATE_GOVERNANCE_DATABASE_URL: postgresql://governance_runtime:change-me@postgres:5432/openkate
+      OPENKATE_EXECUTION_SERVICE_URL: http://execution-service:8004
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8008"]
     expose: ["8008"]
 

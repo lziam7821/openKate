@@ -1,10 +1,13 @@
 import os
+import json
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 import psycopg
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from psycopg.rows import dict_row
@@ -17,6 +20,7 @@ FailureCategory = Literal["product", "environment", "data", "executor", "unknown
 Role = Literal["owner", "maintainer", "reviewer", "developer", "viewer"]
 RuleStatus = Literal["draft", "in_review", "approved", "published", "rolled_back"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
+EXECUTION_SERVICE_URL = os.getenv("OPENKATE_EXECUTION_SERVICE_URL", "http://127.0.0.1:8004")
 
 
 class ClassificationUpdate(BaseModel):
@@ -118,7 +122,7 @@ class RuleStore:
                 for approval in rule["approvals"]:
                     connection.execute("INSERT INTO governance_schema.approvals (id, rule_id, rule_version, approver, created_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING", (approval["id"], rule["id"], approval["version"], approval["actor"], approval["createdAt"]))
                 for evaluation in rule["evaluations"]:
-                    connection.execute("INSERT INTO governance_schema.rule_evaluations (id, rule_id, rule_version, run_ids, new_hits, false_positives, false_negatives, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING", (evaluation["id"], rule["id"], evaluation["version"], Jsonb(evaluation["runIds"]), evaluation["newHits"], evaluation["falsePositives"], evaluation["falseNegatives"], evaluation["createdAt"]))
+                    connection.execute("INSERT INTO governance_schema.rule_evaluations (id, rule_id, rule_version, run_ids, run_snapshot, new_hits, false_positives, false_negatives, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING", (evaluation["id"], rule["id"], evaluation["version"], Jsonb(evaluation["runIds"]), Jsonb(evaluation["runSnapshot"]), evaluation["newHits"], evaluation["falsePositives"], evaluation["falseNegatives"], evaluation["createdAt"]))
         return deepcopy(rule)
 
     def get(self, rule_id: str) -> Optional[Dict]:
@@ -130,8 +134,8 @@ class RuleStore:
                 return None
             versions = connection.execute("SELECT version, scope, expected_effect, content, created_by, created_at, published_at FROM governance_schema.rule_versions WHERE rule_id = %s ORDER BY version", (rule_id,)).fetchall()
             approvals = connection.execute("SELECT id, rule_version, approver, created_at FROM governance_schema.approvals WHERE rule_id = %s ORDER BY created_at", (rule_id,)).fetchall()
-            evaluations = connection.execute("SELECT id, rule_version, run_ids, new_hits, false_positives, false_negatives, created_at FROM governance_schema.rule_evaluations WHERE rule_id = %s ORDER BY created_at", (rule_id,)).fetchall()
-        item = {"id": rule["id"], "badcaseId": rule["badcase_id"], "projectId": rule["project_id"], "status": rule["status"], "riskLevel": rule["risk_level"], "activeVersion": rule["active_version"], "createdBy": rule["created_by"], "createdAt": rule["created_at"].isoformat(), "updatedAt": rule["updated_at"].isoformat(), "versions": [{"version": row["version"], "scope": row["scope"], "expectedEffect": row["expected_effect"], "content": row["content"], "createdBy": row["created_by"], "createdAt": row["created_at"].isoformat(), "publishedAt": row["published_at"].isoformat() if row["published_at"] else None} for row in versions], "approvals": [{"id": row["id"], "version": row["rule_version"], "actor": row["approver"], "createdAt": row["created_at"].isoformat()} for row in approvals], "evaluations": [{"id": row["id"], "version": row["rule_version"], "runIds": row["run_ids"], "newHits": row["new_hits"], "falsePositives": row["false_positives"], "falseNegatives": row["false_negatives"], "createdAt": row["created_at"].isoformat()} for row in evaluations]}
+            evaluations = connection.execute("SELECT id, rule_version, run_ids, run_snapshot, new_hits, false_positives, false_negatives, created_at FROM governance_schema.rule_evaluations WHERE rule_id = %s ORDER BY created_at", (rule_id,)).fetchall()
+        item = {"id": rule["id"], "badcaseId": rule["badcase_id"], "projectId": rule["project_id"], "status": rule["status"], "riskLevel": rule["risk_level"], "activeVersion": rule["active_version"], "createdBy": rule["created_by"], "createdAt": rule["created_at"].isoformat(), "updatedAt": rule["updated_at"].isoformat(), "versions": [{"version": row["version"], "scope": row["scope"], "expectedEffect": row["expected_effect"], "content": row["content"], "createdBy": row["created_by"], "createdAt": row["created_at"].isoformat(), "publishedAt": row["published_at"].isoformat() if row["published_at"] else None} for row in versions], "approvals": [{"id": row["id"], "version": row["rule_version"], "actor": row["approver"], "createdAt": row["created_at"].isoformat()} for row in approvals], "evaluations": [{"id": row["id"], "version": row["rule_version"], "runIds": row["run_ids"], "runSnapshot": row["run_snapshot"], "newHits": row["new_hits"], "falsePositives": row["false_positives"], "falseNegatives": row["false_negatives"], "createdAt": row["created_at"].isoformat()} for row in evaluations]}
         self.items[rule_id] = item
         return deepcopy(item)
 
@@ -147,6 +151,7 @@ class RuleStore:
 store = FailureStore(os.getenv("OPENKATE_GOVERNANCE_DATABASE_URL"))
 badcase_store = BadCaseStore(os.getenv("OPENKATE_GOVERNANCE_DATABASE_URL"))
 rule_store = RuleStore(os.getenv("OPENKATE_GOVERNANCE_DATABASE_URL"))
+historical_contexts: Dict[str, Dict] = {}
 
 
 def actor_role(x_openkate_role: str = Header(default="viewer")) -> Role:
@@ -172,6 +177,26 @@ def get_rule(rule_id: str) -> Dict:
     if rule is None:
         raise HTTPException(status_code=404, detail="rule not found")
     return rule
+
+
+def rule_terms(rule: Dict) -> List[str]:
+    version = rule_store.current_version(rule)
+    value = f"{version['content']} {version['scope']['description']}"
+    return [term for term in set(re.findall(r"[a-z0-9_]+", value.lower())) if len(term) > 3]
+
+
+async def historical_context(run_id: str) -> Dict:
+    if run_id in historical_contexts:
+        return deepcopy(historical_contexts[run_id])
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(f"{EXECUTION_SERVICE_URL}/internal/v1/runs/{run_id}/context")
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="execution service unavailable") from error
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"execution run not found: {run_id}")
+    response.raise_for_status()
+    return response.json()
 
 
 @app.get("/health")
@@ -259,7 +284,18 @@ async def replay_rule(rule_id: str, payload: ReplayRequest, role: Role = Depends
     if rule["status"] not in {"in_review", "approved"}:
         raise HTTPException(status_code=409, detail="rule must be reviewed before replay")
     version = rule_store.current_version(rule)
-    evaluation = {"id": str(uuid4()), "version": version["version"], "runIds": list(dict.fromkeys(payload.run_ids)), "newHits": len(set(payload.run_ids)), "falsePositives": 0, "falseNegatives": 0, "createdAt": FailureStore.now()}
+    run_ids = list(dict.fromkeys(payload.run_ids))
+    contexts = [await historical_context(run_id) for run_id in run_ids]
+    if rule["projectId"] and any(context["run"]["projectId"] != rule["projectId"] for context in contexts):
+        raise HTTPException(status_code=403, detail="historical runs must belong to the rule project")
+    terms = rule_terms(rule)
+    snapshot = []
+    for context in contexts:
+        run = context["run"]
+        failed = any(result["status"] == "failed" for result in run["stepResults"])
+        matched = any(term in json.dumps(context, sort_keys=True).lower() for term in terms)
+        snapshot.append({"runId": run["id"], "projectId": run["projectId"], "status": run["status"], "failed": failed, "matched": matched})
+    evaluation = {"id": str(uuid4()), "version": version["version"], "runIds": run_ids, "runSnapshot": snapshot, "newHits": sum(item["matched"] and item["failed"] for item in snapshot), "falsePositives": sum(item["matched"] and not item["failed"] for item in snapshot), "falseNegatives": sum(not item["matched"] and item["failed"] for item in snapshot), "createdAt": FailureStore.now()}
     rule["evaluations"].append(evaluation)
     rule["updatedAt"] = FailureStore.now()
     rule_store.save(rule)

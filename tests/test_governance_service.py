@@ -1,4 +1,5 @@
 import importlib.util
+from copy import deepcopy
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -37,6 +38,12 @@ def test_badcase_keeps_run_evidence_and_manual_correction() -> None:
 def test_high_risk_rule_requires_replay_two_approvals_and_can_rollback() -> None:
     governance_service.badcase_store.items.clear()
     governance_service.rule_store.items.clear()
+    governance_service.historical_contexts.clear()
+    governance_service.historical_contexts.update({
+        "run-a": {"run": {"id": "run-a", "projectId": "project-payment", "status": "failed", "stepResults": [{"status": "failed", "outputSummary": {"message": "when refund validation failed"}}]}, "plan": {}},
+        "run-b": {"run": {"id": "run-b", "projectId": "project-payment", "status": "completed", "stepResults": [{"status": "completed", "outputSummary": {}}]}, "plan": {}},
+    })
+    historical_before_replay = deepcopy(governance_service.historical_contexts)
     badcase = client.post("/internal/v1/runs/run-payment/badcases", headers={"X-OpenKATE-Actor": "qa-ada"}, json={"evidenceRefs": ["asset://trace-1"], "description": "退款金额未校验"}).json()
     draft = client.post(f"/internal/v1/badcases/{badcase['id']}/rule-drafts", headers={"X-OpenKATE-Actor": "qa-ada", "X-OpenKATE-Role": "developer"}, json={"scope": "payment refunds", "expectedEffect": "block invalid refund totals", "riskLevel": "high", "projectId": "project-payment"})
     assert draft.status_code == 201
@@ -47,10 +54,12 @@ def test_high_risk_rule_requires_replay_two_approvals_and_can_rollback() -> None
     assert approved.json()["status"] == "approved"
     replay = client.post(f"/internal/v1/rules/{rule_id}/replay", headers={"X-OpenKATE-Role": "reviewer"}, json={"runIds": ["run-a", "run-a", "run-b"]})
     assert replay.json()["runIds"] == ["run-a", "run-b"]
+    assert replay.json()["runSnapshot"][0]["failed"] is True
+    assert governance_service.historical_contexts == historical_before_replay
     published = client.post(f"/internal/v1/rules/{rule_id}/publish", headers={"X-OpenKATE-Role": "maintainer"})
     assert published.json()["activeVersion"] == 1
     assert client.get("/internal/v1/projects/project-payment/rules/published").json()["items"][0]["id"] == rule_id
-    assert client.get(f"/internal/v1/rules/{rule_id}/metrics").json()["hitRate"] == 1
+    assert client.get(f"/internal/v1/rules/{rule_id}/metrics").json()["hitRate"] == 0.5
     assert client.post(f"/internal/v1/rules/{rule_id}/rollback", headers={"X-OpenKATE-Role": "maintainer"}).json()["activeVersion"] is None
 
 
