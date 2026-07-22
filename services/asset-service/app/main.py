@@ -1,5 +1,6 @@
 import base64
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 from uuid import uuid4
@@ -13,6 +14,7 @@ app = FastAPI(title="asset-service", version="0.3.0")
 instrument_app(app, "asset-service", ["evidence"])
 ROOT = Path(os.getenv("OPENKATE_ASSET_DIR", "/tmp/openkate-assets"))
 documents: Dict[str, Dict] = {}
+evidence_assets: Dict[str, Dict] = {}
 
 
 class AssetCreate(BaseModel):
@@ -49,6 +51,7 @@ async def create_asset(payload: AssetCreate) -> dict:
     path = ROOT / payload.run_id / payload.step_id / asset_id
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
+    evidence_assets[asset_id] = {"id": asset_id, "runId": payload.run_id, "stepId": payload.step_id, "kind": payload.kind, "contentType": payload.content_type, "path": path, "createdAt": datetime.now(timezone.utc).isoformat()}
     return {"id": asset_id, "ref": f"asset://{asset_id}", "contentType": payload.content_type, "path": str(path)}
 
 
@@ -98,6 +101,8 @@ async def document_detail(asset_id: str) -> Dict:
 
 @app.get("/internal/v1/assets/{asset_id}")
 async def read_asset(asset_id: str) -> FileResponse:
+    if asset := evidence_assets.get(asset_id):
+        return FileResponse(asset["path"])
     matches = list(ROOT.glob(f"*/*/{asset_id}"))
     if len(matches) != 1:
         raise HTTPException(status_code=404, detail="asset not found")

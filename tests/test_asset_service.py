@@ -13,12 +13,14 @@ spec.loader.exec_module(asset_service)
 
 def test_asset_service_stores_and_serves_evidence(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(asset_service, "ROOT", tmp_path)
+    asset_service.evidence_assets.clear()
     client = TestClient(asset_service.app)
     created = client.post("/internal/v1/assets", json={"runId": "run-1", "stepId": "pay", "kind": "http", "contentType": "application/json", "contentBase64": "eyJzdGF0dXMiOiJQQUlEIn0="})
     assert created.status_code == 201
     assert created.json()["ref"].startswith("asset://asset_")
     asset_id = created.json()["id"]
     assert client.get(f"/internal/v1/assets/{asset_id}").content == b'{"status":"PAID"}'
+    assert asset_service.evidence_assets[asset_id]["runId"] == "run-1"
 
 
 def test_markdown_and_openapi_assets_keep_stable_source_locations(monkeypatch, tmp_path) -> None:
