@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 import psycopg
+import httpx
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from openkate_common.service_app import instrument_app
@@ -18,6 +19,7 @@ instrument_app(app, "execution-service", ["plan", "run", "lease"])
 Channel = Literal["ui", "api", "state"]
 TEMPLATE_PATTERN = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*}}")
 SENSITIVE_PARTS = {"authorization", "cookie", "password", "secret", "token", "api_key", "apikey", "access_token", "refresh_token"}
+EXECUTOR_URLS = {"ui": os.getenv("OPENKATE_EXECUTOR_UI_URL", "http://127.0.0.1:8011"), "api": os.getenv("OPENKATE_EXECUTOR_API_URL", "http://127.0.0.1:8012"), "state": os.getenv("OPENKATE_EXECUTOR_STATE_URL", "http://127.0.0.1:8013")}
 
 
 class ApiModel(BaseModel):
@@ -379,6 +381,20 @@ def with_etag(response: Response, plan: Dict[str, Any]) -> Dict[str, Any]:
 @app.get("/health", tags=["system"])
 async def health() -> Dict[str, str]:
     return {"service": "execution-service", "status": "ready"}
+
+
+@app.get("/internal/v1/projects/{project_id}/executor-capabilities")
+async def executor_capabilities(project_id: str) -> Dict[str, Any]:
+    items = []
+    async with httpx.AsyncClient(timeout=1.0) as client:
+        for channel, url in EXECUTOR_URLS.items():
+            try:
+                response = await client.get(f"{url}/health")
+                body = response.json() if response.is_success else {}
+                items.append({"channel": channel, "worker": body.get("worker"), "capabilities": body.get("capabilities", []), "status": "ready" if response.is_success else "unavailable"})
+            except httpx.HTTPError:
+                items.append({"channel": channel, "worker": None, "capabilities": [], "status": "unavailable"})
+    return {"projectId": project_id, "items": items}
 
 
 @app.post("/internal/v1/scenarios/{scenario_id}/execution-plans", status_code=status.HTTP_201_CREATED)
