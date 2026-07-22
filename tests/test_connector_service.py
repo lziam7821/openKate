@@ -21,11 +21,14 @@ def test_github_webhook_validates_signature_and_deduplicates(monkeypatch) -> Non
     monkeypatch.setenv("OPENKATE_WEBHOOK_SECRETS", json.dumps({"vault://github-demo": "webhook-secret"}))
     created = client.post("/internal/v1/projects/project-a/connectors", headers={"X-OpenKATE-Role": "maintainer"}, json={"provider": "github", "repository": "openkate/demo", "secretRef": "vault://github-demo"})
     assert created.status_code == 201
-    body = b'{"action":"opened","pull_request":{"number":12}}'
+    body = b'{"action":"opened","pull_request":{"number":12,"head":{"sha":"abc123"}}}'
     signature = "sha256=" + hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
     path = "/internal/v1/webhooks/github/project-a"
     headers = {"X-Hub-Signature-256": signature, "X-GitHub-Delivery": "delivery-1", "Content-Type": "application/json"}
-    assert client.post(path, headers=headers, content=body).json()["status"] == "accepted"
+    accepted = client.post(path, headers=headers, content=body).json()
+    assert accepted["status"] == "accepted"
+    assert accepted["pullRequestId"]
+    assert connector_service.store.pull_requests[accepted["pullRequestId"]]["headSha"] == "abc123"
     assert client.post(path, headers=headers, content=body).json()["status"] == "duplicate"
 
 

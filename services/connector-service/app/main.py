@@ -31,6 +31,7 @@ class ConnectorStore:
         self.database_url = database_url
         self.connectors: Dict[str, Dict] = {}
         self.deliveries: Dict[str, Dict] = {}
+        self.pull_requests: Dict[str, Dict] = {}
 
     @staticmethod
     def now() -> str:
@@ -68,6 +69,14 @@ class ConnectorStore:
         self.deliveries[key] = {"connectorId": connector["id"], "deliveryId": delivery_id, "payload": deepcopy(payload)}
         return True
 
+    def record_pull_request(self, connector: Dict, delivery_id: str, event: Dict) -> Dict:
+        item = {"id": f"pr_{connector['id']}_{event['number']}", "connectorId": connector["id"], "projectId": connector["projectId"], "deliveryId": delivery_id, **event, "receivedAt": self.now()}
+        self.pull_requests[item["id"]] = item
+        if self.database_url:
+            with psycopg.connect(self.database_url) as connection:
+                connection.execute("INSERT INTO connector_schema.pull_requests (id, connector_id, project_id, delivery_id, number, action, head_sha, payload, received_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET delivery_id = EXCLUDED.delivery_id, action = EXCLUDED.action, head_sha = EXCLUDED.head_sha, payload = EXCLUDED.payload, received_at = EXCLUDED.received_at", (item["id"], connector["id"], connector["projectId"], delivery_id, event["number"], event["action"], event["headSha"], Jsonb(event["payload"]), item["receivedAt"]))
+        return deepcopy(item)
+
 
 store = ConnectorStore(os.getenv("OPENKATE_CONNECTOR_DATABASE_URL"))
 
@@ -94,6 +103,16 @@ def valid_signature(provider: Provider, headers: Dict[str, str], body: bytes, se
         expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         return hmac.compare_digest(supplied, expected)
     return hmac.compare_digest(headers.get("x-gitlab-token", ""), secret)
+
+
+def pull_request_event(provider: Provider, payload: Dict) -> Optional[Dict]:
+    if provider == "github" and payload.get("pull_request"):
+        pull_request = payload["pull_request"]
+        return {"number": int(pull_request["number"] if "number" in pull_request else payload["number"]), "action": payload.get("action", "updated"), "headSha": pull_request["head"]["sha"], "payload": payload}
+    if provider == "gitlab" and payload.get("object_attributes", {}).get("iid"):
+        attributes = payload["object_attributes"]
+        return {"number": int(attributes["iid"]), "action": attributes.get("action", "updated"), "headSha": attributes.get("last_commit", {}).get("id", ""), "payload": payload}
+    return None
 
 
 @app.get("/health")
@@ -126,4 +145,6 @@ async def receive_webhook(provider: Provider, project_id: str, request: Request)
     except json.JSONDecodeError as error:
         raise HTTPException(status_code=400, detail="webhook body must be JSON") from error
     accepted = store.record_delivery(connector, delivery_id, payload)
-    return {"deliveryId": delivery_id, "status": "accepted" if accepted else "duplicate"}
+    event = pull_request_event(provider, payload) if accepted else None
+    pull_request = store.record_pull_request(connector, delivery_id, event) if event else None
+    return {"deliveryId": delivery_id, "status": "accepted" if accepted else "duplicate", "pullRequestId": pull_request["id"] if pull_request else None}
