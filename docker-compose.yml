@@ -157,7 +157,9 @@ services:
 
   execution-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/execution-service}}
-    environment: {PYTHONPATH: /app/packages/python:/app/services/execution-service}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/execution-service
+      OPENKATE_EXECUTION_DATABASE_URL: postgresql://execution_runtime:change-me@postgres:5432/openkate
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8004"]
     expose: ["8004"]
     profiles: [executors]

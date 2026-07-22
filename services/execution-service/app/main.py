@@ -1,3 +1,4 @@
+import os
 import re
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -6,6 +7,9 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="execution-service", version="0.3.0")
@@ -67,7 +71,8 @@ class StepFail(ApiModel):
 
 
 class ExecutionStore:
-    def __init__(self) -> None:
+    def __init__(self, database_url: Optional[str] = None) -> None:
+        self.database_url = database_url
         self.plans: Dict[str, Dict[str, Any]] = {}
         self.runs: Dict[str, Dict[str, Any]] = {}
         self.leases: Dict[str, Dict[str, Any]] = {}
@@ -79,31 +84,95 @@ class ExecutionStore:
         return datetime.now(timezone.utc).isoformat()
 
     def event(self, event_type: str, plan: Dict[str, Any]) -> None:
-        self.events.append(
-            {
-                "eventId": str(uuid4()),
-                "eventType": event_type,
-                "projectId": plan["projectId"],
-                "aggregateId": plan["id"],
-                "occurredAt": self.now(),
-                "payload": {"executionPlan": deepcopy(plan)},
-            }
-        )
+        self._record_event(event_type, plan["projectId"], plan["id"], {"executionPlan": deepcopy(plan)})
 
     def run_event(self, event_type: str, run: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> None:
-        self.events.append(
-            {
-                "eventId": str(uuid4()),
-                "eventType": event_type,
-                "projectId": run["projectId"],
-                "aggregateId": run["id"],
-                "occurredAt": self.now(),
-                "payload": payload or {"runId": run["id"], "status": run["status"]},
-            }
-        )
+        self._record_event(event_type, run["projectId"], run["id"], payload or {"runId": run["id"], "status": run["status"]})
+
+    def _record_event(self, event_type: str, project_id: str, aggregate_id: str, payload: Dict[str, Any]) -> None:
+        event = {"eventId": str(uuid4()), "eventType": event_type, "projectId": project_id, "aggregateId": aggregate_id, "occurredAt": self.now(), "payload": payload}
+        self.events.append(event)
+        if self.database_url:
+            with psycopg.connect(self.database_url) as connection:
+                connection.execute("INSERT INTO execution_schema.outbox_events (id, aggregate_id, event_type, payload, occurred_at) VALUES (%s, %s, %s, %s, %s)", (event["eventId"], aggregate_id, event_type, Jsonb(event), event["occurredAt"]))
+
+    def save_plan(self, plan: Dict[str, Any]) -> None:
+        self.plans[plan["id"]] = deepcopy(plan)
+        if not self.database_url:
+            return
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute("INSERT INTO execution_schema.execution_plans (id, project_id, scenario_id, scenario_version, status, version, revision, variables, timeout_ms, created_at, updated_at, document) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, version = EXCLUDED.version, revision = EXCLUDED.revision, variables = EXCLUDED.variables, timeout_ms = EXCLUDED.timeout_ms, updated_at = EXCLUDED.updated_at, document = EXCLUDED.document", (plan["id"], plan["projectId"], plan["scenarioId"], plan["scenarioVersion"], plan["status"], plan["version"], plan["revision"], Jsonb(plan["variables"]), plan["timeoutMs"], plan["createdAt"], plan["updatedAt"], Jsonb(plan)))
+            connection.execute("DELETE FROM execution_schema.execution_steps WHERE plan_id = %s", (plan["id"],))
+            for position, step_id in enumerate(plan["orderedStepIds"]):
+                step = next(item for item in plan["steps"] if item["id"] == step_id)
+                connection.execute("INSERT INTO execution_schema.execution_steps (plan_id, id, channel, action, position, depends_on, input, save, timeout_ms, idempotent, compensation) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", (plan["id"], step["id"], step["channel"], step["action"], position, step["dependsOn"], Jsonb(step["input"]), Jsonb(step["save"]), step["timeoutMs"], step["idempotent"], step.get("compensation")))
+
+    def save_run(self, run: Dict[str, Any]) -> None:
+        self.runs[run["id"]] = deepcopy(run)
+        if not self.database_url:
+            return
+        lease = self.leases[run["leaseId"]]
+        with psycopg.connect(self.database_url) as connection:
+            connection.execute("INSERT INTO execution_schema.execution_runs (id, project_id, scenario_id, scenario_version, plan_id, environment_id, status, attempt, retry_of, deadline, created_at, started_at, completed_at, document) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, completed_at = EXCLUDED.completed_at, document = EXCLUDED.document", (run["id"], run["projectId"], run["scenarioId"], run["scenarioVersion"], run["planId"], run["environmentId"], run["status"], run["attempt"], run["retryOf"], run["deadline"], run["createdAt"], run["startedAt"], run["completedAt"], Jsonb(run)))
+            connection.execute("INSERT INTO execution_schema.resource_leases (id, run_id, account_ref, data_set_ref, browser_context_id, status, acquired_at, released_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, released_at = EXCLUDED.released_at", (lease["id"], run["id"], lease["accountLeaseId"], lease["dataSetId"], lease["browserContextId"], lease["status"], lease["acquiredAt"], lease["releasedAt"]))
+            connection.execute("DELETE FROM execution_schema.step_results WHERE run_id = %s", (run["id"],))
+            connection.execute("DELETE FROM execution_schema.run_variables WHERE run_id = %s", (run["id"],))
+            for result in run["stepResults"]:
+                connection.execute("INSERT INTO execution_schema.step_results (run_id, step_id, status, output_summary, assertions, evidence_refs, error, started_at, completed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)", (run["id"], result["stepId"], result["status"], Jsonb(result["outputSummary"]), Jsonb(result["assertions"]), result["evidenceRefs"], Jsonb(result["error"]) if result["error"] else None, result["startedAt"], result["completedAt"]))
+            for name, value in run["_variables"].items():
+                connection.execute("INSERT INTO execution_schema.run_variables (run_id, name, value, sensitive) VALUES (%s, %s, %s, %s)", (run["id"], name, Jsonb(value), name in run["_sensitiveVariables"]))
+
+    def plan(self, plan_id: str) -> Optional[Dict[str, Any]]:
+        if plan_id in self.plans or not self.database_url:
+            return self.plans.get(plan_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute("SELECT document FROM execution_schema.execution_plans WHERE id = %s", (plan_id,)).fetchone()
+        if row:
+            self.plans[plan_id] = row["document"]
+        return self.plans.get(plan_id)
+
+    def run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        if run_id in self.runs or not self.database_url:
+            return self.runs.get(run_id)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute("SELECT document FROM execution_schema.execution_runs WHERE id = %s", (run_id,)).fetchone()
+            lease = connection.execute("SELECT id, account_ref, data_set_ref, browser_context_id, status, acquired_at, released_at FROM execution_schema.resource_leases WHERE run_id = %s", (run_id,)).fetchone()
+        if row:
+            self.runs[run_id] = row["document"]
+            if lease:
+                self.leases[lease["id"]] = {"id": lease["id"], "runId": run_id, "accountLeaseId": lease["account_ref"], "dataSetId": lease["data_set_ref"], "browserContextId": lease["browser_context_id"], "status": lease["status"], "acquiredAt": lease["acquired_at"].isoformat(), "releasedAt": lease["released_at"].isoformat() if lease["released_at"] else None}
+        return self.runs.get(run_id)
+
+    def idempotent_run(self, key: str) -> Optional[str]:
+        if key in self.idempotency or not self.database_url:
+            return self.idempotency.get(key)
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute("SELECT run_id FROM execution_schema.idempotency_keys WHERE key = %s", (key,)).fetchone()
+        if row:
+            self.idempotency[key] = row["run_id"]
+        return self.idempotency.get(key)
+
+    def remember_idempotency(self, key: str, run_id: str) -> None:
+        self.idempotency[key] = run_id
+        if self.database_url:
+            with psycopg.connect(self.database_url) as connection:
+                connection.execute("INSERT INTO execution_schema.idempotency_keys (key, run_id) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", (key, run_id))
+
+    def events_for(self, aggregate_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if not self.database_url:
+            return [event for event in self.events if aggregate_id is None or event["aggregateId"] == aggregate_id]
+        query = "SELECT payload FROM execution_schema.outbox_events"
+        params: tuple = ()
+        if aggregate_id:
+            query += " WHERE aggregate_id = %s"
+            params = (aggregate_id,)
+        query += " ORDER BY occurred_at, id"
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [row["payload"] for row in rows]
 
 
-store = ExecutionStore()
+store = ExecutionStore(os.getenv("OPENKATE_EXECUTION_DATABASE_URL"))
 
 
 def template_variables(value: Any) -> Set[str]:
@@ -166,14 +235,14 @@ def validate_dag(steps: List[ExecutionStep], initial_variables: Set[str]) -> Lis
 
 
 def get_plan(plan_id: str) -> Dict[str, Any]:
-    plan = store.plans.get(plan_id)
+    plan = store.plan(plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="execution plan not found")
     return plan
 
 
 def get_run(run_id: str) -> Dict[str, Any]:
-    run = store.runs.get(run_id)
+    run = store.run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="execution run not found")
     return run
@@ -282,6 +351,7 @@ def require_active_deadline(run: Dict[str, Any]) -> None:
             result.update({"status": "failed", "completedAt": store.now(), "error": {"category": "timeout", "message": "execution plan deadline exceeded"}})
     release_lease(run)
     store.run_event("execution.run.completed.v1", run, {"runId": run["id"], "status": "failed", "category": "timeout"})
+    store.save_run(run)
     raise HTTPException(status_code=408, detail="execution plan deadline exceeded")
 
 
@@ -335,7 +405,7 @@ async def create_execution_plan(scenario_id: str, payload: PlanCreate, response:
         "createdAt": now,
         "updatedAt": now,
     }
-    store.plans[plan["id"]] = plan
+    store.save_plan(plan)
     store.event("execution.plan.created.v1", plan)
     return with_etag(response, plan)
 
@@ -365,12 +435,13 @@ async def update_execution_plan(plan_id: str, payload: PlanUpdate, response: Res
     plan["version"] += 1
     plan["revision"] += 1
     plan["updatedAt"] = store.now()
+    store.save_plan(plan)
     return with_etag(response, plan)
 
 
 @app.get("/internal/v1/events")
 async def list_events() -> List[Dict[str, Any]]:
-    return deepcopy(store.events)
+    return deepcopy(store.events_for())
 
 
 @app.post("/internal/v1/scenarios/{scenario_id}/runs", status_code=status.HTTP_202_ACCEPTED)
@@ -383,13 +454,14 @@ async def create_run(
     if not idempotency_key:
         raise HTTPException(status_code=428, detail="Idempotency-Key is required")
     key = f"{x_project_id}:{idempotency_key}"
-    if existing_id := store.idempotency.get(key):
+    if existing_id := store.idempotent_run(key):
         return public_run(get_run(existing_id))
     plan = get_plan(payload.plan_id)
     if plan["projectId"] != x_project_id or plan["scenarioId"] != scenario_id:
         raise HTTPException(status_code=404, detail="execution plan not found for scenario")
     run = create_run_record(plan, payload.environment_id, payload.variables, payload.allowed_hosts, payload.account_refs, payload.data_set_refs)
-    store.idempotency[key] = run["id"]
+    store.save_run(run)
+    store.remember_idempotency(key, run["id"])
     return public_run(run)
 
 
@@ -407,7 +479,7 @@ async def run_context(run_id: str) -> Dict[str, Any]:
 @app.get("/internal/v1/runs/{run_id}/events")
 async def run_events(run_id: str, after: int = 0) -> Dict[str, Any]:
     get_run(run_id)
-    events = [event for event in store.events if event["aggregateId"] == run_id]
+    events = store.events_for(run_id)
     return {"events": deepcopy(events[after:]), "next": len(events)}
 
 
@@ -428,6 +500,7 @@ async def start_step(run_id: str, step_id: str) -> Dict[str, Any]:
     result["status"] = "running"
     result["startedAt"] = store.now()
     store.run_event("execution.step.started.v1", run, {"runId": run_id, "stepId": step_id, "channel": step["channel"]})
+    store.save_run(run)
     return deepcopy(result)
 
 
@@ -462,6 +535,7 @@ async def complete_step(run_id: str, step_id: str, payload: StepComplete) -> Dic
         run["completedAt"] = store.now()
         release_lease(run)
         store.run_event("execution.run.completed.v1", run)
+    store.save_run(run)
     return deepcopy(result)
 
 
@@ -477,6 +551,7 @@ async def fail_step(run_id: str, step_id: str, payload: StepFail) -> Dict[str, A
     release_lease(run)
     store.run_event("execution.step.failed.v1", run, {"runId": run_id, "stepId": step_id, "status": "failed", "category": payload.category})
     store.run_event("execution.run.completed.v1", run)
+    store.save_run(run)
     return deepcopy(result)
 
 
@@ -495,6 +570,7 @@ async def cancel_run(run_id: str) -> Dict[str, Any]:
             result["completedAt"] = store.now()
     release_lease(run)
     store.run_event("execution.run.canceled.v1", run)
+    store.save_run(run)
     return public_run(run)
 
 
@@ -506,7 +582,7 @@ async def retry_run(run_id: str, idempotency_key: Optional[str] = Header(default
     if not idempotency_key:
         raise HTTPException(status_code=428, detail="Idempotency-Key is required")
     key = f"{previous['projectId']}:{idempotency_key}"
-    if existing_id := store.idempotency.get(key):
+    if existing_id := store.idempotent_run(key):
         return public_run(get_run(existing_id))
     retried = create_run_record(
         get_plan(previous["planId"]),
@@ -517,5 +593,6 @@ async def retry_run(run_id: str, idempotency_key: Optional[str] = Header(default
         previous["dataSetPool"],
         retry_of=run_id,
     )
-    store.idempotency[key] = retried["id"]
+    store.save_run(retried)
+    store.remember_idempotency(key, retried["id"])
     return public_run(retried)
