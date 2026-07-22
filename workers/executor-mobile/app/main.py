@@ -34,6 +34,8 @@ async def execute_mobile(request: ExecutorRequest, driver_factory: Optional[Call
     capabilities = payload.get("capabilities")
     if not isinstance(capabilities, dict) or not capabilities:
         raise HTTPException(status_code=422, detail="mobile capabilities are required")
+    if payload.get("deviceId") and capabilities.get("appium:udid") != payload["deviceId"]:
+        raise HTTPException(status_code=422, detail="mobile capability udid must match the leased deviceId")
     driver = await asyncio.to_thread(driver_factory or create_driver, capabilities)
     artifact_root = Path(os.getenv("OPENKATE_ARTIFACT_DIR", "/tmp/openkate-artifacts")) / request.run_id / request.step_id
     artifact_root.mkdir(parents=True, exist_ok=True)

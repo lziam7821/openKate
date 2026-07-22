@@ -346,12 +346,13 @@ def create_run_record(
         "allowedHosts": list(allowed_hosts or []),
         "accountPool": list(account_pool),
         "dataSetPool": list(data_set_pool),
+        "deviceId": lease["deviceId"],
         "status": "running",
         "leaseId": lease_id,
         "retryOf": retry_of,
         "attempt": 1 if retry_of is None else store.runs[retry_of]["attempt"] + 1,
         "variables": sorted({**plan["variables"], **variables}),
-        "_variables": {**deepcopy(plan["variables"]), **deepcopy(variables)},
+        "_variables": {**deepcopy(plan["variables"]), **deepcopy(variables), **({"deviceId": lease["deviceId"]} if lease["deviceId"] else {})},
         "_sensitiveVariables": sorted(name for name in {**plan["variables"], **variables} if sensitive_variable(name)),
         "stepResults": [
             {"stepId": step_id, "status": "pending", "startedAt": None, "completedAt": None, "outputSummary": {}, "assertions": [], "evidenceRefs": [], "error": None}

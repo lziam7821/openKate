@@ -67,7 +67,7 @@ class ScenarioExecutionWorkflow:
                 "runId": run_id,
                 "stepId": step_id,
                 "action": step["action"],
-                "input": step["input"],
+                "input": {**step["input"], **({"deviceId": run["deviceId"]} if step["channel"] == "mobile" else {})},
                 "variables": run["_variables"],
                 "allowedHosts": run.get("allowedHosts", []),
                 "timeoutMs": step["timeoutMs"],

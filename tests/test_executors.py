@@ -254,7 +254,7 @@ def test_mobile_executor_collects_screenshot_and_page_source_with_device_actions
             return None
 
     monkeypatch.setenv("OPENKATE_ARTIFACT_DIR", str(tmp_path))
-    request = ExecutorRequest.model_validate({"runId": "run-mobile", "stepId": "checkout", "action": "sequence", "input": {"capabilities": {"appium:deviceName": "Pixel"}, "actions": [{"type": "fill", "by": "id", "selector": "sku", "value": "SKU-1"}, {"type": "tap", "by": "id", "selector": "submit"}, {"type": "extractText", "by": "id", "selector": "result", "saveAs": "message"}]}})
+    request = ExecutorRequest.model_validate({"runId": "run-mobile", "stepId": "checkout", "action": "sequence", "input": {"deviceId": "emulator-1", "capabilities": {"appium:deviceName": "Pixel", "appium:udid": "emulator-1"}, "actions": [{"type": "fill", "by": "id", "selector": "sku", "value": "SKU-1"}, {"type": "tap", "by": "id", "selector": "submit"}, {"type": "extractText", "by": "id", "selector": "result", "saveAs": "message"}]}})
     result = asyncio.run(mobile_executor.execute_mobile(request, lambda _: Driver()))
     assert result.output == {"message": "Order created"}
     assert result.environment["device"] == "Pixel"
