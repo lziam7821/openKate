@@ -41,6 +41,7 @@ class ConnectorStore:
         self.deliveries: Dict[str, Dict] = {}
         self.pull_requests: Dict[str, Dict] = {}
         self.ci_runs: Dict[str, Dict] = {}
+        self.sync_cursors: Dict[str, Dict] = {}
 
     @staticmethod
     def now() -> str:
@@ -93,6 +94,23 @@ class ConnectorStore:
                 connection.execute("INSERT INTO connector_schema.ci_runs (id, project_id, pull_request_id, commit_sha, targets, scenario_ids, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET scenario_ids = EXCLUDED.scenario_ids, status = EXCLUDED.status", (item["id"], item["projectId"], item["pullRequestId"], item["commitSha"], Jsonb(item["targets"]), item["scenarioIds"], item["status"], item["createdAt"]))
         return deepcopy(item)
 
+    def sync(self, connector_id: str) -> Optional[Dict]:
+        connector = self.connectors.get(connector_id)
+        if connector is None and self.database_url:
+            with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+                row = connection.execute("SELECT id, project_id, provider, repository, secret_ref, created_at FROM connector_schema.connectors WHERE id = %s", (connector_id,)).fetchone()
+            if row:
+                connector = {"id": row["id"], "projectId": row["project_id"], "provider": row["provider"], "repository": row["repository"], "secretRef": row["secret_ref"], "createdAt": row["created_at"].isoformat()}
+                self.connectors[connector_id] = connector
+        if connector is None:
+            return None
+        item = {"connectorId": connector_id, "repository": connector["repository"], "cursor": None, "status": "queued", "synchronizedAt": self.now()}
+        self.sync_cursors[connector_id] = item
+        if self.database_url:
+            with psycopg.connect(self.database_url) as connection:
+                connection.execute("INSERT INTO connector_schema.sync_cursors (connector_id, cursor, status, synchronized_at) VALUES (%s, %s, %s, %s) ON CONFLICT (connector_id) DO UPDATE SET status = EXCLUDED.status, synchronized_at = EXCLUDED.synchronized_at", (connector_id, None, item["status"], item["synchronizedAt"]))
+        return deepcopy(item)
+
 
 store = ConnectorStore(os.getenv("OPENKATE_CONNECTOR_DATABASE_URL"))
 
@@ -139,6 +157,14 @@ async def health() -> Dict[str, str]:
 @app.post("/internal/v1/projects/{project_id}/connectors", status_code=201)
 async def create_connector(project_id: str, payload: ConnectorCreate, role: Role = Depends(require_write)) -> Dict:
     return store.create(project_id, payload)
+
+
+@app.post("/internal/v1/connectors/{connector_id}/sync", status_code=202)
+async def sync_connector(connector_id: str, role: Role = Depends(require_write)) -> Dict:
+    result = store.sync(connector_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="connector not found")
+    return result
 
 
 @app.post("/internal/v1/webhooks/{provider}/{project_id}", status_code=202)

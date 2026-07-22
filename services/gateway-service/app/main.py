@@ -513,6 +513,11 @@ async def create_connector(project_id: str, request: Request) -> JSONResponse:
     return await connector_request("POST", f"/internal/v1/projects/{project_id}/connectors", request)
 
 
+@app.post("/api/v1/connectors/{connector_id}/sync", status_code=202)
+async def sync_connector(connector_id: str, request: Request) -> JSONResponse:
+    return await connector_request("POST", f"/internal/v1/connectors/{connector_id}/sync", request)
+
+
 @app.post("/api/v1/ci/projects/{project_id}/trigger", status_code=202)
 async def trigger_ci(project_id: str, request: Request) -> JSONResponse:
     return await connector_request("POST", f"/internal/v1/ci/projects/{project_id}/trigger", request)

@@ -55,3 +55,11 @@ def test_ci_trigger_selects_impacted_scenarios_or_requires_confirmation(monkeypa
     assert triggered.json()["status"] == "queued"
     assert triggered.json()["scenarioIds"] == ["scenario-payment"]
     assert client.get(f"/internal/v1/ci/runs/{triggered.json()['id']}/status").json()["commitSha"] == "abc123"
+
+
+def test_connector_sync_persists_a_resumable_cursor_state() -> None:
+    connector_service.store.connectors.clear()
+    created = client.post("/internal/v1/projects/project-a/connectors", headers={"X-OpenKATE-Role": "maintainer"}, json={"provider": "gitlab", "repository": "openkate/demo", "secretRef": "vault://gitlab-demo"}).json()
+    synced = client.post(f"/internal/v1/connectors/{created['id']}/sync", headers={"X-OpenKATE-Role": "maintainer"})
+    assert synced.status_code == 202
+    assert synced.json()["repository"] == "openkate/demo"
