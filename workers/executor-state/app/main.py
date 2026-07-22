@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 
-from openkate_executor import ExecutorRequest, ExecutorResult, evaluate_assertions, redact, render_templates, store_evidence
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, evaluate_assertions, redact, render_templates, store_evidence
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-state", version="0.3.0")
@@ -56,7 +56,7 @@ def execute_state(request: ExecutorRequest, connection_factory: Optional[Callabl
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only"], "sdkVersion": "1.0", "contractVersion": "1"}
+    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
 
 
 @app.post("/execute", response_model=ExecutorResult)

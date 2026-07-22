@@ -1,10 +1,14 @@
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApiModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
+
+
+SDK_VERSION = "1.0"
+CONTRACT_VERSION = "1"
 
 
 class ExecutorRequest(ApiModel):
@@ -25,3 +29,25 @@ class ExecutorResult(ApiModel):
     assertions: List[Dict[str, Any]] = Field(default_factory=list)
     evidence_refs: List[str] = Field(default_factory=list, alias="evidenceRefs")
     environment: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutorHealth(ApiModel):
+    worker: str = Field(min_length=1)
+    status: Literal["ready", "unavailable"]
+    capabilities: List[str] = Field(min_length=1)
+    sdk_version: str = Field(alias="sdkVersion")
+    contract_version: str = Field(alias="contractVersion")
+
+
+@runtime_checkable
+class TestExecutor(Protocol):
+    capabilities: List[str]
+
+    def validate(self, request: ExecutorRequest) -> None:
+        ...
+
+    async def execute(self, request: ExecutorRequest) -> ExecutorResult:
+        ...
+
+    async def cancel(self, request: ExecutorRequest) -> None:
+        ...

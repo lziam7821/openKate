@@ -12,6 +12,7 @@ import httpx
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from openkate_common.service_app import instrument_app
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorHealth
 
 app = FastAPI(title="execution-service", version="0.3.0")
 instrument_app(app, "execution-service", ["plan", "run", "lease"])
@@ -417,10 +418,10 @@ async def refresh_executor_capabilities(project_id: str) -> List[Dict[str, Any]]
             item = unavailable_capability(channel, observed_at)
             try:
                 response = await client.get(f"{url}/health")
-                body = response.json() if response.is_success else {}
-                if body.get("status") == "ready" and isinstance(body.get("worker"), str) and isinstance(body.get("capabilities"), list):
-                    item.update({"worker": body["worker"], "capabilities": body["capabilities"], "sdkVersion": body.get("sdkVersion"), "contractVersion": body.get("contractVersion"), "status": "ready"})
-            except httpx.HTTPError:
+                health = ExecutorHealth.model_validate(response.json()) if response.is_success else None
+                if health and health.status == "ready" and health.sdk_version == SDK_VERSION and health.contract_version == CONTRACT_VERSION:
+                    item.update({"worker": health.worker, "capabilities": health.capabilities, "sdkVersion": health.sdk_version, "contractVersion": health.contract_version, "status": "ready"})
+            except (httpx.HTTPError, ValueError):
                 pass
             items.append(item)
     items.extend(unavailable_capability(channel, observed_at) for channel in CHANNELS if channel not in EXECUTOR_URLS)

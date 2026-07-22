@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional
 import httpx
 from fastapi import FastAPI, HTTPException
 
-from openkate_executor import ExecutorRequest, ExecutorResult, assert_allowed_url, evaluate_assertions, redact, render_templates, store_evidence
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, assert_allowed_url, evaluate_assertions, redact, render_templates, store_evidence
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-api", version="0.3.0")
@@ -40,7 +40,7 @@ async def execute_api(request: ExecutorRequest, transport: Optional[httpx.AsyncB
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"worker": "executor-api", "status": "ready", "capabilities": ["api.http"], "sdkVersion": "1.0", "contractVersion": "1"}
+    return {"worker": "executor-api", "status": "ready", "capabilities": ["api.http"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
 
 
 @app.post("/execute", response_model=ExecutorResult)

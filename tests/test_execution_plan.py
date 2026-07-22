@@ -127,3 +127,26 @@ def test_capability_discovery_registers_workers_and_missing_channels(monkeypatch
     assert items["api"]["worker"] == "executor-api"
     assert items["api"]["sdkVersion"] == "1.0"
     assert items["mobile"]["status"] == "unavailable"
+
+
+def test_capability_discovery_rejects_incompatible_worker_contract(monkeypatch) -> None:
+    reset_store()
+    execution_service.store.capabilities.clear()
+
+    class WorkerClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url):
+            return __import__("httpx").Response(200, json={"worker": "executor-api", "status": "ready", "capabilities": ["api.http"], "sdkVersion": "999.0", "contractVersion": "1"})
+
+    monkeypatch.setattr(execution_service.httpx, "AsyncClient", WorkerClient)
+    response = client.get("/internal/v1/projects/project_incompatible/executor-capabilities")
+    assert response.status_code == 200
+    assert all(item["status"] == "unavailable" for item in response.json()["items"][:3])
