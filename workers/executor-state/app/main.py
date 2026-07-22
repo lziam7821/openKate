@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Optional
 import httpx
 from fastapi import FastAPI, HTTPException
 
-from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, assert_allowed_url, evaluate_assertions, redact, render_templates, store_evidence
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, ExecutorRuntime, assert_allowed_url, evaluate_assertions, redact, render_templates, store_evidence
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-state", version="0.3.0")
@@ -133,6 +133,9 @@ def execute_state(request: ExecutorRequest, connection_factory: Optional[Callabl
     )
 
 
+executor = ExecutorRuntime(["state.postgresql.read_only", "state.redis.read_only", "state.nats", "state.eventual-consistency", "state.log", "state.trace"], lambda request: asyncio.to_thread(execute_state, request))
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only", "state.redis.read_only", "state.nats", "state.eventual-consistency", "state.log", "state.trace"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
@@ -140,4 +143,10 @@ async def health() -> Dict[str, Any]:
 
 @app.post("/execute", response_model=ExecutorResult)
 async def execute(request: ExecutorRequest) -> ExecutorResult:
-    return execute_state(request)
+    return await executor.execute(request)
+
+
+@app.post("/cancel")
+async def cancel(request: ExecutorRequest) -> Dict[str, str]:
+    await executor.cancel(request)
+    return {"runId": request.run_id, "stepId": request.step_id, "status": "canceling"}

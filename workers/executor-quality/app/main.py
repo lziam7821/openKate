@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import shutil
@@ -9,7 +10,7 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import FastAPI, HTTPException
 
 from openkate_common.service_app import instrument_app
-from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, assert_allowed_url, evaluate_assertions, redact, render_templates, store_evidence
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, ExecutorRuntime, assert_allowed_url, evaluate_assertions, redact, render_templates, store_evidence
 
 app = FastAPI(title="executor-quality", version="0.8.0")
 instrument_app(app, "executor-quality", ["quality.k6", "quality.zap"])
@@ -54,6 +55,9 @@ def execute_quality(request: ExecutorRequest, run: Callable[..., Any] = subproce
     return ExecutorResult(status="completed", output=result, inputSummary=redact({"action": request.action, "input": payload}), outputSummary=redact(result), assertions=assertions, evidenceRefs=[store_evidence(request.run_id, request.step_id, request.action, json.dumps(redact(result)).encode(), "application/json")], environment={"executor": f"quality.{request.action}"})
 
 
+executor = ExecutorRuntime(["quality.k6", "quality.zap"], lambda request: asyncio.to_thread(execute_quality, request))
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     capabilities = [f"quality.{name}" for name in ("k6", "zap") if binary(name)]
@@ -62,4 +66,10 @@ async def health() -> Dict[str, Any]:
 
 @app.post("/execute", response_model=ExecutorResult)
 async def execute(request: ExecutorRequest) -> ExecutorResult:
-    return execute_quality(request)
+    return await executor.execute(request)
+
+
+@app.post("/cancel")
+async def cancel(request: ExecutorRequest) -> Dict[str, str]:
+    await executor.cancel(request)
+    return {"runId": request.run_id, "stepId": request.step_id, "status": "canceling"}

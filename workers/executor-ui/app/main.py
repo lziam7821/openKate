@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException
 
-from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, assert_allowed_url, redact, render_templates, store_file_evidence
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, ExecutorRuntime, assert_allowed_url, redact, render_templates, store_file_evidence
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-ui", version="0.3.0")
@@ -63,6 +63,9 @@ async def execute_ui(request: ExecutorRequest) -> ExecutorResult:
     )
 
 
+executor = ExecutorRuntime(["ui.web"], execute_ui)
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     return {"worker": "executor-ui", "status": "ready", "capabilities": ["ui.web"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
@@ -70,4 +73,10 @@ async def health() -> Dict[str, Any]:
 
 @app.post("/execute", response_model=ExecutorResult)
 async def execute(request: ExecutorRequest) -> ExecutorResult:
-    return await execute_ui(request)
+    return await executor.execute(request)
+
+
+@app.post("/cancel")
+async def cancel(request: ExecutorRequest) -> Dict[str, str]:
+    await executor.cancel(request)
+    return {"runId": request.run_id, "stepId": request.step_id, "status": "canceling"}

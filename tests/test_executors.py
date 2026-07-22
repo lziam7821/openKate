@@ -9,7 +9,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from openkate_executor import ExecutorRequest, assert_health_contract
+from openkate_executor import ExecutorRequest, assert_executor_contract, assert_health_contract
 
 
 ROOT = Path(__file__).parents[1]
@@ -35,6 +35,24 @@ def test_worker_health_contracts_are_compatible(monkeypatch) -> None:
     monkeypatch.setenv("OPENKATE_APPIUM_URL", "http://appium.test")
     for worker in (api_executor, state_executor, ui_executor, mobile_executor, external_executor):
         assert_health_contract(asyncio.run(worker.health()))
+
+
+def test_worker_executor_contracts_are_compatible() -> None:
+    for worker in (api_executor, state_executor, ui_executor, mobile_executor, external_executor, quality_executor):
+        assert_executor_contract(worker.executor)
+
+
+def test_executor_runtime_cancels_a_running_callback_wait() -> None:
+    request = ExecutorRequest.model_validate({"runId": "run-cancel", "stepId": "callback", "action": "waitForCallback", "timeoutMs": 300000, "input": {"callbackToken": "cancel-token"}})
+
+    async def verify() -> None:
+        task = asyncio.create_task(external_executor.executor.execute(request))
+        await asyncio.sleep(0)
+        await external_executor.executor.cancel(request)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(verify())
 
 
 def test_api_executor_calls_real_http_transport_transfers_variable_and_redacts_evidence() -> None:

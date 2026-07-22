@@ -1,6 +1,6 @@
 from typing import Any, Dict
 
-from .models import CONTRACT_VERSION, SDK_VERSION, ExecutorHealth, ExecutorResult
+from .models import CONTRACT_VERSION, SDK_VERSION, ExecutorHealth, ExecutorResult, TestExecutor
 
 
 def assert_health_contract(payload: Dict[str, Any]) -> ExecutorHealth:
@@ -15,3 +15,8 @@ def assert_result_contract(payload: Dict[str, Any]) -> ExecutorResult:
     result = ExecutorResult.model_validate(payload)
     assert result.status == "completed"
     return result
+
+
+def assert_executor_contract(executor: object) -> TestExecutor:
+    assert isinstance(executor, TestExecutor)
+    return executor

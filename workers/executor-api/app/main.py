@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 import httpx
 from fastapi import FastAPI, HTTPException
 
-from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, assert_allowed_url, evaluate_assertions, redact, render_templates, store_evidence
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, ExecutorRuntime, assert_allowed_url, evaluate_assertions, redact, render_templates, store_evidence
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-api", version="0.3.0")
@@ -73,6 +73,9 @@ async def execute_api(request: ExecutorRequest, transport: Optional[httpx.AsyncB
     )
 
 
+executor = ExecutorRuntime(["api.http", "api.graphql", "api.grpc.unary"], execute_api)
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     return {"worker": "executor-api", "status": "ready", "capabilities": ["api.http", "api.graphql", "api.grpc.unary"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
@@ -80,4 +83,10 @@ async def health() -> Dict[str, Any]:
 
 @app.post("/execute", response_model=ExecutorResult)
 async def execute(request: ExecutorRequest) -> ExecutorResult:
-    return await execute_api(request)
+    return await executor.execute(request)
+
+
+@app.post("/cancel")
+async def cancel(request: ExecutorRequest) -> Dict[str, str]:
+    await executor.cancel(request)
+    return {"runId": request.run_id, "stepId": request.step_id, "status": "canceling"}

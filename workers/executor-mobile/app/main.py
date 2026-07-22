@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import FastAPI, HTTPException
 
 from openkate_common.service_app import instrument_app
-from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, redact, render_templates, store_file_evidence
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, ExecutorRuntime, redact, render_templates, store_file_evidence
 
 app = FastAPI(title="executor-mobile", version="0.8.0")
 instrument_app(app, "executor-mobile", ["mobile.appium"])
@@ -74,6 +74,9 @@ async def execute_mobile(request: ExecutorRequest, driver_factory: Optional[Call
     )
 
 
+executor = ExecutorRuntime(["mobile.appium"], execute_mobile)
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     return {"worker": "executor-mobile", "status": "ready" if appium_url() else "unavailable", "capabilities": ["mobile.appium"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
@@ -81,4 +84,10 @@ async def health() -> Dict[str, Any]:
 
 @app.post("/execute", response_model=ExecutorResult)
 async def execute(request: ExecutorRequest) -> ExecutorResult:
-    return await execute_mobile(request)
+    return await executor.execute(request)
+
+
+@app.post("/cancel")
+async def cancel(request: ExecutorRequest) -> Dict[str, str]:
+    await executor.cancel(request)
+    return {"runId": request.run_id, "stepId": request.step_id, "status": "canceling"}

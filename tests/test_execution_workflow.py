@@ -157,3 +157,18 @@ def test_workflow_compensates_completed_steps_before_failure() -> None:
     asyncio.run(client.aclose())
     assert any(path.endswith("/compensated") for path in calls)
     assert any(path.endswith("/execute") for path in calls)
+
+
+def test_workflow_notifies_running_executor_before_run_cancellation() -> None:
+    state = context()
+    state["run"]["stepResults"][1]["status"] = "running"
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.port, request.url.path, json.loads(request.content) if request.content else {}))
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    asyncio.run(workflow_service.cancel_running_steps("run-1", state, client))
+    asyncio.run(client.aclose())
+    assert calls == [(8012, "/cancel", {"runId": "run-1", "stepId": "pay_order", "action": "request", "input": {"url": "https://payments.test/{{ orderId }}"}, "variables": {"orderId": "order-42"}, "allowedHosts": ["payments.test"], "timeoutMs": 1000})]

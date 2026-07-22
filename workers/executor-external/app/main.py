@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from openkate_common.service_app import instrument_app
-from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, evaluate_assertions, redact, render_templates, store_evidence
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, ExecutorRuntime, evaluate_assertions, redact, render_templates, store_evidence
 
 app = FastAPI(title="executor-external", version="0.8.0")
 instrument_app(app, "executor-external", ["external.callback", "external.test-data"])
@@ -68,6 +68,9 @@ async def execute_external(request: ExecutorRequest) -> ExecutorResult:
     return ExecutorResult(status="completed", output=output, inputSummary=redact(payload), outputSummary=redact(output), assertions=assertions, evidenceRefs=[store_evidence(request.run_id, request.step_id, "callback" if request.action == "waitForCallback" else "test-data", json.dumps(redact(output)).encode(), "application/json")], environment={"executor": "external.callback" if request.action == "waitForCallback" else "external.test-data"})
 
 
+executor = ExecutorRuntime(["external.callback", "external.test-data"], execute_external)
+
+
 @app.post("/callbacks/{token}", status_code=status.HTTP_202_ACCEPTED)
 async def receive_callback(token: str, request: Request) -> Dict[str, Any]:
     try:
@@ -86,4 +89,10 @@ async def health() -> Dict[str, Any]:
 
 @app.post("/execute", response_model=ExecutorResult)
 async def execute(request: ExecutorRequest) -> ExecutorResult:
-    return await execute_external(request)
+    return await executor.execute(request)
+
+
+@app.post("/cancel")
+async def cancel(request: ExecutorRequest) -> Dict[str, str]:
+    await executor.cancel(request)
+    return {"runId": request.run_id, "stepId": request.step_id, "status": "canceling"}

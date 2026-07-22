@@ -30,6 +30,30 @@ TEMPORAL_ENABLED = os.getenv("OPENKATE_TEMPORAL_ENABLED", "false").lower() == "t
 SCENARIO_TASK_QUEUE = "scenario-execution"
 
 
+def executor_request(run_id: str, step: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "runId": run_id,
+        "stepId": step["id"],
+        "action": step["action"],
+        "input": {**step["input"], **({"deviceId": run["deviceId"]} if step["channel"] == "mobile" else {})},
+        "variables": run["_variables"],
+        "allowedHosts": run.get("allowedHosts", []),
+        "timeoutMs": step["timeoutMs"],
+    }
+
+async def cancel_running_steps(run_id: str, context: Dict[str, Any], client: httpx.AsyncClient) -> None:
+    run, plan = context["run"], context["plan"]
+    steps = {step["id"]: step for step in plan["steps"]}
+    for result in run["stepResults"]:
+        if result["status"] != "running":
+            continue
+        step = steps[result["stepId"]]
+        try:
+            await client.post(f"{EXECUTOR_URLS[step['channel']]}/cancel", json=executor_request(run_id, step, run))
+        except httpx.HTTPError:
+            pass
+
+
 class ScenarioExecutionWorkflow:
     def __init__(self, client: Optional[httpx.AsyncClient] = None) -> None:
         self.client = client
@@ -69,12 +93,12 @@ class ScenarioExecutionWorkflow:
                 await self._abort(run_id, step_id, "dependency_error", self._message(response), run, plan, client)
                 return False
 
-        executor_request = {"runId": run_id, "stepId": step_id, "action": step["action"], "input": {**step["input"], **({"deviceId": run["deviceId"]} if step["channel"] == "mobile" else {})}, "variables": run["_variables"], "allowedHosts": run.get("allowedHosts", []), "timeoutMs": step["timeoutMs"]}
+        request_payload = executor_request(run_id, step, run)
         attempts = 3 if step["idempotent"] else 1
         response: Optional[httpx.Response] = None
         for attempt in range(attempts):
             try:
-                response = await client.post(f"{EXECUTOR_URLS[step['channel']]}/execute", json=executor_request)
+                response = await client.post(f"{EXECUTOR_URLS[step['channel']]}/execute", json=request_payload)
             except httpx.HTTPError as error:
                 if attempt + 1 == attempts:
                     await self._abort(run_id, step_id, "executor_unavailable", str(error), run, plan, client)
@@ -192,6 +216,12 @@ async def start_workflow(run_id: str) -> Dict[str, str]:
 @app.post("/internal/v1/runs/{run_id}/cancel")
 async def cancel_workflow(run_id: str) -> Dict[str, str]:
     workflow_id = f"workflow_{run_id}"
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        context = await client.get(f"{EXECUTION_SERVICE_URL}/internal/v1/runs/{run_id}/context")
+        if context.status_code == 404:
+            raise HTTPException(status_code=404, detail="execution run not found")
+        if context.is_success:
+            await cancel_running_steps(run_id, context.json(), client)
     if TEMPORAL_ENABLED:
         client = await Client.connect(TEMPORAL_ADDRESS, namespace=TEMPORAL_NAMESPACE)
         await client.get_workflow_handle(workflow_id).cancel()
