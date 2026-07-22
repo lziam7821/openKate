@@ -245,6 +245,16 @@ async def published_rules(project_id: str) -> Dict:
     return {"items": [{"id": rule["id"], "activeVersion": rule["activeVersion"], "content": next(version["content"] for version in rule["versions"] if version["version"] == rule["activeVersion"])} for rule in rules]}
 
 
+@app.get("/internal/v1/projects/{project_id}/rules")
+async def project_rules(project_id: str) -> Dict:
+    rules = [rule for rule in rule_store.items.values() if rule["projectId"] == project_id]
+    if rule_store.database_url:
+        with psycopg.connect(rule_store.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute("SELECT id FROM governance_schema.business_rules WHERE project_id = %s ORDER BY updated_at DESC", (project_id,)).fetchall()
+        rules = [get_rule(row["id"]) for row in rows]
+    return {"items": [RuleStore.public(rule) for rule in rules]}
+
+
 @app.post("/internal/v1/rules/{rule_id}/review")
 async def review_rule(rule_id: str, payload: RuleReview, actor: str = Depends(actor_name), role: Role = Depends(require_role("owner", "maintainer", "reviewer"))) -> Dict:
     rule = get_rule(rule_id)

@@ -517,6 +517,11 @@ async def rule_detail(rule_id: str, request: Request) -> JSONResponse:
     return await governance_request("GET", f"/internal/v1/rules/{rule_id}", request)
 
 
+@app.get("/api/v1/projects/{project_id}/rules")
+async def project_rules(project_id: str, request: Request) -> JSONResponse:
+    return await governance_request("GET", f"/internal/v1/projects/{project_id}/rules", request)
+
+
 @app.get("/api/v1/rules/{rule_id}/metrics")
 async def rule_metrics(rule_id: str, request: Request) -> JSONResponse:
     return await governance_request("GET", f"/internal/v1/rules/{rule_id}/metrics", request)

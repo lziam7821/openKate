@@ -21,6 +21,11 @@ export type ExecutionPlan = { id: string; scenarioId: string; scenarioVersion: n
 export type StepResult = { stepId: string; status: "pending" | "running" | "completed" | "failed" | "canceled"; startedAt?: string; completedAt?: string; assertions: { passed?: boolean }[]; evidenceRefs: string[]; error?: { category: string; message: string } };
 export type ExecutionRun = { id: string; planId: string; scenarioId: string; status: "running" | "completed" | "failed" | "canceled"; attempt: number; retryOf?: string; leaseId: string; variables: string[]; stepResults: StepResult[]; createdAt: string; completedAt?: string };
 export type RunEvents = { events: { eventId: string; eventType: string; occurredAt: string; payload: Record<string, unknown> }[]; next: number };
+export type KnowledgeItem = { id: string; projectId: string; title: string; content: string; source: string; category: "historical_defect" | "historical_case"; score?: number };
+export type KnowledgeResult = { items: KnowledgeItem[]; snapshot: { id: string; projectId: string; ids: string[] } };
+export type BadCase = { id: string; runId: string; projectId?: string; evidenceRefs: string[]; description: string; createdBy: string; createdAt: string };
+export type BusinessRule = { id: string; projectId?: string; badcaseId: string; status: "draft" | "in_review" | "approved" | "published" | "rolled_back"; riskLevel: RiskLevel; activeVersion?: number; versions: { version: number; scope: { description: string }; expectedEffect: string; content: string; publishedAt?: string }[] };
+export type RuleMetrics = { ruleId: string; activeVersion?: number; hitRate: number; falsePositiveRate: number; falseNegatives: number; recentUsage: { replays: number; runs: number } };
 
 type ApiResult<T> = { data: T; etag?: string; degraded: boolean };
 
@@ -74,4 +79,12 @@ export const api = {
   runEvents: (runId: string) => request<RunEvents>(`/api/v1/runs/${runId}/events`),
   cancelRun: (runId: string) => request<{ runId: string; status: string }>(`/api/v1/runs/${runId}/cancel`, { method: "POST" }),
   retryRun: (runId: string) => request<ExecutionRun>(`/api/v1/runs/${runId}/retry`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } }),
+  knowledge: (projectId: string, q = "") => request<KnowledgeResult>(`/api/v1/projects/${projectId}/knowledge${q ? `?q=${encodeURIComponent(q)}` : ""}`),
+  importKnowledge: (projectId: string, payload: object) => request<KnowledgeItem>(`/api/v1/projects/${projectId}/knowledge/imports`, { method: "POST", body: JSON.stringify(payload) }),
+  createBadCase: (runId: string, payload: object) => request<BadCase>(`/api/v1/runs/${runId}/badcases`, { method: "POST", body: JSON.stringify(payload) }),
+  rules: (projectId: string) => request<{ items: BusinessRule[] }>(`/api/v1/projects/${projectId}/rules`),
+  rule: (ruleId: string) => request<BusinessRule>(`/api/v1/rules/${ruleId}`),
+  createRuleDraft: (badcaseId: string, payload: object) => request<BusinessRule>(`/api/v1/badcases/${badcaseId}/rule-drafts`, { method: "POST", body: JSON.stringify(payload) }),
+  ruleAction: (ruleId: string, action: "review" | "approve" | "replay" | "publish" | "rollback", payload?: object) => request<BusinessRule | Record<string, unknown>>(`/api/v1/rules/${ruleId}/${action}`, { method: "POST", ...(payload ? { body: JSON.stringify(payload) } : {}) }),
+  ruleMetrics: (ruleId: string) => request<RuleMetrics>(`/api/v1/rules/${ruleId}/metrics`),
 };
