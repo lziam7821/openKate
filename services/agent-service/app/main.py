@@ -13,6 +13,7 @@ instrument_app(app, "agent-service", ["scenario-generation"])
 ASSET_SERVICE_URL = os.getenv("OPENKATE_ASSET_SERVICE_URL", "http://127.0.0.1:8006")
 VALIDATION_SERVICE_URL = os.getenv("OPENKATE_VALIDATION_SERVICE_URL", "http://127.0.0.1:8002")
 tasks: Dict[str, Dict[str, Any]] = {}
+knowledge: Dict[str, List[Dict[str, Any]]] = {}
 
 
 class GenerationCreate(BaseModel):
@@ -22,6 +23,12 @@ class GenerationCreate(BaseModel):
 class ReviewDecision(BaseModel):
     decision: Literal["approve", "changes_requested"]
     comment: str = Field(default="", max_length=2000)
+
+
+class KnowledgeImport(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    content: str = Field(min_length=1, max_length=10000)
+    source: str = Field(min_length=1, max_length=500)
 
 
 def now() -> str:
@@ -59,6 +66,20 @@ def event(task: Dict[str, Any], event_type: str, payload: Dict[str, Any]) -> Non
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"service": "agent-service", "status": "ready"}
+
+
+@app.post("/internal/v1/projects/{project_id}/knowledge/imports", status_code=201)
+async def import_knowledge(project_id: str, payload: KnowledgeImport) -> Dict[str, Any]:
+    item = {"id": f"knowledge_{uuid4().hex[:12]}", "projectId": project_id, **payload.model_dump(), "createdAt": now()}
+    knowledge.setdefault(project_id, []).append(item)
+    return item
+
+
+@app.get("/internal/v1/projects/{project_id}/knowledge")
+async def list_knowledge(project_id: str, q: str = "") -> Dict[str, Any]:
+    terms = [term.lower() for term in q.split()]
+    items = [item for item in knowledge.get(project_id, []) if all(term in f"{item['title']} {item['content']}".lower() for term in terms)]
+    return {"items": items, "snapshot": {"projectId": project_id, "ids": [item["id"] for item in items]}}
 
 
 @app.post("/internal/v1/projects/{project_id}/scenario-generations", status_code=202)
