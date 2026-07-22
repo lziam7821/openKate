@@ -513,6 +513,16 @@ async def create_connector(project_id: str, request: Request) -> JSONResponse:
     return await connector_request("POST", f"/internal/v1/projects/{project_id}/connectors", request)
 
 
+@app.post("/api/v1/ci/projects/{project_id}/trigger", status_code=202)
+async def trigger_ci(project_id: str, request: Request) -> JSONResponse:
+    return await connector_request("POST", f"/internal/v1/ci/projects/{project_id}/trigger", request)
+
+
+@app.get("/api/v1/ci/runs/{run_id}/status")
+async def ci_status(run_id: str, request: Request) -> JSONResponse:
+    return await connector_request("GET", f"/internal/v1/ci/runs/{run_id}/status", request)
+
+
 @app.post("/api/v1/webhooks/{provider}/{project_id}", status_code=202)
 async def connector_webhook(provider: str, project_id: str, request: Request) -> JSONResponse:
     headers = {key: value for key, value in request.headers.items() if key.lower() in {"content-type", "x-hub-signature-256", "x-github-delivery", "x-gitlab-token", "x-gitlab-event-uuid"}}
