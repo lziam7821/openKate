@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from typing import Any, Callable, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -22,7 +23,7 @@ def secret_value(reference: str) -> str:
     return value
 
 
-def execute_state(request: ExecutorRequest, connection_factory: Optional[Callable[..., Any]] = None) -> ExecutorResult:
+def execute_state(request: ExecutorRequest, connection_factory: Optional[Callable[..., Any]] = None, sleep: Callable[[float], None] = time.sleep) -> ExecutorResult:
     payload = render_templates(request.input, request.variables)
     query = str(payload.get("query", ""))
     if not READ_ONLY_SQL.match(query) or ";" in query.rstrip().rstrip(";"):
@@ -34,15 +35,26 @@ def execute_state(request: ExecutorRequest, connection_factory: Optional[Callabl
             raise HTTPException(status_code=503, detail="PostgreSQL executor dependency is unavailable") from error
         connection_factory = psycopg.connect
     dsn = secret_value(str(payload.get("connectionSecretRef", "")))
-    with connection_factory(dsn, options="-c default_transaction_read_only=on") as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(query, payload.get("params", {}))
-            columns = [column.name for column in cursor.description or []]
-            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-    actual = {"rows": rows, "rowCount": len(rows)}
-    assertions = evaluate_assertions(actual, payload.get("assertions", []))
-    if any(not assertion["passed"] for assertion in assertions):
-        raise HTTPException(status_code=422, detail="state assertion failed")
+    wait = request.action == "wait"
+    interval = int(payload.get("pollIntervalMs", 250))
+    multiplier = float(payload.get("backoffMultiplier", 1))
+    if wait and (interval < 1 or multiplier < 1):
+        raise HTTPException(status_code=422, detail="poll interval and backoff multiplier must be positive")
+    deadline = time.monotonic() + request.timeout_ms / 1000
+    while True:
+        with connection_factory(dsn, options="-c default_transaction_read_only=on") as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(query, payload.get("params", {}))
+                columns = [column.name for column in cursor.description or []]
+                rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        actual = {"rows": rows, "rowCount": len(rows)}
+        assertions = evaluate_assertions(actual, payload.get("assertions", []))
+        if not any(not assertion["passed"] for assertion in assertions):
+            break
+        if not wait or time.monotonic() >= deadline:
+            raise HTTPException(status_code=422, detail="state assertion timed out" if wait else "state assertion failed")
+        sleep(min(interval / 1000, max(0, deadline - time.monotonic())))
+        interval = int(interval * multiplier)
     return ExecutorResult(
         status="completed",
         output=actual,
@@ -50,13 +62,13 @@ def execute_state(request: ExecutorRequest, connection_factory: Optional[Callabl
         outputSummary=redact(actual),
         assertions=assertions,
         evidenceRefs=[store_evidence(request.run_id, request.step_id, "query", json.dumps(redact(actual)).encode(), "application/json")],
-        environment={"executor": "state.postgresql.read_only"},
+        environment={"executor": "state.postgresql.read_only", "polling": wait},
     )
 
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
+    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only", "state.eventual-consistency"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
 
 
 @app.post("/execute", response_model=ExecutorResult)

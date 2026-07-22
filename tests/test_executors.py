@@ -182,6 +182,48 @@ def test_state_executor_is_parameterized_read_only_and_never_returns_credentials
     assert error.value.status_code == 422
 
 
+def test_state_executor_polls_until_eventually_consistent(monkeypatch) -> None:
+    class Cursor:
+        description = [type("Column", (), {"name": "status"})()]
+
+        def __init__(self, status):
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def execute(self, query, params):
+            assert query == "SELECT status FROM orders WHERE id = %(id)s"
+            assert params == {"id": "order-42"}
+
+        def fetchall(self):
+            return [(self.status,)]
+
+    statuses = iter(["PENDING", "PAID"])
+
+    class Connection:
+        def __init__(self):
+            self.status = next(statuses)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def cursor(self):
+            return Cursor(self.status)
+
+    monkeypatch.setenv("OPENKATE_SECRET_STAGING_DB", "postgresql://user:password@db/openkate")
+    request = ExecutorRequest.model_validate({"runId": "run-wait", "stepId": "wait-order", "action": "wait", "timeoutMs": 1000, "input": {"connectionSecretRef": "staging-db", "query": "SELECT status FROM orders WHERE id = %(id)s", "params": {"id": "order-42"}, "pollIntervalMs": 1, "backoffMultiplier": 2, "assertions": [{"path": "rows.0.status", "operator": "equals", "expected": "PAID"}]}})
+    result = state_executor.execute_state(request, lambda *args, **kwargs: Connection(), lambda _: None)
+    assert result.output["rows"] == [{"status": "PAID"}]
+    assert result.environment["polling"] is True
+
+
 def test_mobile_executor_collects_screenshot_and_page_source_with_device_actions(monkeypatch, tmp_path) -> None:
     class Element:
         text = "Order created"
