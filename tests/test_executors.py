@@ -237,6 +237,21 @@ def test_state_executor_queries_log_and_trace_providers_with_allowlist() -> None
     assert result.environment["executor"] == "state.trace"
 
 
+def test_state_executor_reads_redis_value_and_ttl(monkeypatch) -> None:
+    class Cache:
+        def get(self, key):
+            assert key == "order:42"
+            return b"PAID"
+
+        def ttl(self, key):
+            return 300
+
+    monkeypatch.setenv("OPENKATE_SECRET_CACHE", "redis://cache.test/0")
+    request = ExecutorRequest.model_validate({"runId": "run-cache", "stepId": "cache", "action": "cache", "input": {"connectionSecretRef": "cache", "key": "order:42", "assertions": [{"path": "value", "operator": "equals", "expected": "PAID"}, {"path": "ttl", "operator": "equals", "expected": 300}]}})
+    result = state_executor.execute_state(request, cache_factory=lambda url: Cache())
+    assert result.environment["executor"] == "state.redis.read_only"
+
+
 def test_mobile_executor_collects_screenshot_and_page_source_with_device_actions(monkeypatch, tmp_path) -> None:
     class Element:
         text = "Order created"
