@@ -82,6 +82,29 @@ def test_api_executor_runs_graphql_requests_and_asserts_errors() -> None:
     assert result.assertions[0]["passed"] is True
 
 
+def test_api_executor_runs_allowlisted_grpc_unary_call() -> None:
+    class Channel:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def unary_unary(self, method):
+            assert method == "/payments.Payment/Authorize"
+
+            def invoke(body, timeout, metadata):
+                assert body == b"request"
+                assert ("trace-id", "trace-1") in metadata
+                return b"response"
+
+            return invoke
+
+    request = ExecutorRequest.model_validate({"runId": "run-grpc", "stepId": "authorize", "action": "grpc", "allowedHosts": ["payments.test"], "input": {"target": "payments.test:443", "method": "/payments.Payment/Authorize", "requestBase64": "cmVxdWVzdA==", "metadata": {"trace-id": "trace-1"}, "assertions": [{"path": "responseBase64", "operator": "equals", "expected": "cmVzcG9uc2U="}]}})
+    result = asyncio.run(api_executor.execute_api(request, grpc_channel_factory=lambda target: Channel()))
+    assert result.environment["executor"] == "api.grpc"
+
+
 class CheckoutHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         body = b'''<!doctype html><input id="sku"><button id="submit" type="button" onclick="document.querySelector('#result').dataset.orderId='order-42';document.querySelector('#result').textContent='Created'">Order</button><div id="result"></div>'''
