@@ -9,7 +9,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from openkate_executor import ExecutorRequest
+from openkate_executor import ExecutorRequest, assert_health_contract
 
 
 ROOT = Path(__file__).parents[1]
@@ -29,6 +29,12 @@ ui_executor = load("ui_executor", "workers/executor-ui/app/main.py")
 mobile_executor = load("mobile_executor", "workers/executor-mobile/app/main.py")
 external_executor = load("external_executor", "workers/executor-external/app/main.py")
 quality_executor = load("quality_executor", "workers/executor-quality/app/main.py")
+
+
+def test_worker_health_contracts_are_compatible(monkeypatch) -> None:
+    monkeypatch.setenv("OPENKATE_APPIUM_URL", "http://appium.test")
+    for worker in (api_executor, state_executor, ui_executor, mobile_executor, external_executor):
+        assert_health_contract(asyncio.run(worker.health()))
 
 
 def test_api_executor_calls_real_http_transport_transfers_variable_and_redacts_evidence() -> None:
