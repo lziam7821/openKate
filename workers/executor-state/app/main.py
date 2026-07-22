@@ -1,10 +1,11 @@
+import json
 import os
 import re
 from typing import Any, Callable, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 
-from openkate_executor import ExecutorRequest, ExecutorResult, evaluate_assertions, redact, render_templates
+from openkate_executor import ExecutorRequest, ExecutorResult, evaluate_assertions, redact, render_templates, store_evidence
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-state", version="0.3.0")
@@ -48,7 +49,7 @@ def execute_state(request: ExecutorRequest, connection_factory: Optional[Callabl
         inputSummary=redact({"query": query, "params": payload.get("params", {}), "connectionSecretRef": payload.get("connectionSecretRef")}),
         outputSummary=redact(actual),
         assertions=assertions,
-        evidenceRefs=[f"run://{request.run_id}/steps/{request.step_id}/query"],
+        evidenceRefs=[store_evidence(request.run_id, request.step_id, "query", json.dumps(redact(actual)).encode(), "application/json")],
         environment={"executor": "state.postgresql.read_only"},
     )
 

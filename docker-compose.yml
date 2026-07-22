@@ -120,9 +120,12 @@ services:
   asset-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/asset-service}}
     profiles: [core]
-    environment: {PYTHONPATH: /app/packages/python:/app/services/asset-service}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/asset-service
+      OPENKATE_ASSET_DIR: /assets
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8006"]
     expose: ["8006"]
+    volumes: ["asset_data:/assets"]
 
   agent-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/agent-service}}
@@ -208,6 +211,7 @@ services:
     environment:
       PYTHONPATH: /app/packages/python:/app/workers/executor-ui
       OPENKATE_ARTIFACT_DIR: /artifacts
+      OPENKATE_ASSET_SERVICE_URL: http://asset-service:8006
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8011"]
     expose: ["8011"]
     volumes: ["execution_artifacts:/artifacts"]
@@ -215,7 +219,9 @@ services:
 
   executor-api:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: workers/executor-api}}
-    environment: {PYTHONPATH: /app/packages/python:/app/workers/executor-api}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/workers/executor-api
+      OPENKATE_ASSET_SERVICE_URL: http://asset-service:8006
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8012"]
     expose: ["8012"]
     profiles: [executors]
@@ -225,6 +231,7 @@ services:
     environment:
       PYTHONPATH: /app/packages/python:/app/workers/executor-state
       OPENKATE_SECRET_STAGING_DB: ${OPENKATE_SECRET_STAGING_DB:-}
+      OPENKATE_ASSET_SERVICE_URL: http://asset-service:8006
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8013"]
     expose: ["8013"]
     profiles: [executors]
@@ -246,3 +253,4 @@ volumes:
   postgres_data:
   minio_data:
   execution_artifacts:
+  asset_data:

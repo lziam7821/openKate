@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException
 
-from openkate_executor import ExecutorRequest, ExecutorResult, assert_allowed_url, redact, render_templates
+from openkate_executor import ExecutorRequest, ExecutorResult, assert_allowed_url, redact, render_templates, store_file_evidence
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-ui", version="0.3.0")
@@ -58,7 +58,7 @@ async def execute_ui(request: ExecutorRequest) -> ExecutorResult:
         output=output,
         inputSummary=redact({"url": url, "actions": payload.get("actions", [])}),
         outputSummary=redact(output),
-        evidenceRefs=[str(screenshot), str(trace)],
+        evidenceRefs=[store_file_evidence(request.run_id, request.step_id, "screenshot", screenshot, "image/png"), store_file_evidence(request.run_id, request.step_id, "trace", trace, "application/zip")],
         environment={"executor": "ui.playwright", "browserContext": f"{request.run_id}:{request.step_id}"},
     )
 
