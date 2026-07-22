@@ -133,6 +133,19 @@ def test_permissions_filters_and_illegal_transitions() -> None:
     assert listed.json()["total"] == 1
 
 
+def test_approved_scenario_relations_drive_impact_candidates() -> None:
+    reset_store()
+    scenario = create_scenario()
+    relation = client.post(f"/internal/v1/scenarios/{scenario['id']}/relations", headers={"X-OpenKATE-Role": "developer", "If-Match": '"1"'}, json={"kind": "code_file", "target": "src/payments/refunds.py"})
+    assert relation.status_code == 201
+    submitted = client.post(f"/internal/v1/scenarios/{scenario['id']}/submit-review", headers={"X-OpenKATE-Role": "developer", "If-Match": etag(relation)})
+    assert client.post(f"/internal/v1/scenarios/{scenario['id']}/approve", headers={"X-OpenKATE-Role": "reviewer", "If-Match": etag(submitted)}).status_code == 200
+    impacted = client.get("/internal/v1/projects/project_checkout/scenarios/impacted?targets=src/payments/refunds.py").json()
+    assert impacted["items"][0]["id"] == scenario["id"]
+    assert impacted["fallbackRequired"] is False
+    assert client.get("/internal/v1/projects/project_checkout/scenarios/impacted?targets=unknown.py").json()["fallbackRequired"] is True
+
+
 def test_review_resolution_and_approved_terminal_transitions() -> None:
     reset_store()
     scenario = create_scenario()

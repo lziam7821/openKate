@@ -83,6 +83,11 @@ class RejectRequest(ApiModel):
     reason: str = Field(min_length=1, max_length=4000)
 
 
+class ScenarioRelation(ApiModel):
+    kind: Literal["code_file", "api_endpoint", "page", "business_object"]
+    target: str = Field(min_length=1, max_length=500)
+
+
 class ValidationStore:
     def __init__(self, database_url: Optional[str] = None) -> None:
         self.database_url = database_url
@@ -189,6 +194,7 @@ class ValidationStore:
             connection.execute("DELETE FROM validation_schema.risks WHERE scenario_id = %s", (scenario["id"],))
             connection.execute("DELETE FROM validation_schema.evidence_points WHERE scenario_id = %s", (scenario["id"],))
             connection.execute("DELETE FROM validation_schema.reviews WHERE scenario_id = %s", (scenario["id"],))
+            connection.execute("DELETE FROM validation_schema.scenario_relations WHERE scenario_id = %s", (scenario["id"],))
             for version in scenario["versions"]:
                 for index, risk in enumerate(version.get("risks", [])):
                     connection.execute(
@@ -205,6 +211,8 @@ class ValidationStore:
                     "INSERT INTO validation_schema.reviews (id, scenario_id, scenario_version, author, content, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (review["id"], scenario["id"], review.get("scenarioVersion", scenario["version"]), review["author"], review["content"], review["status"], review["createdAt"]),
                 )
+            for relation in scenario.get("relations", []):
+                connection.execute("INSERT INTO validation_schema.scenario_relations (scenario_id, kind, target) VALUES (%s, %s, %s)", (scenario["id"], relation["kind"], relation["target"]))
 
     def ready(self) -> bool:
         if self.database_url is None:
@@ -300,6 +308,7 @@ async def create_scenario(
         "reviews": [],
         "auditLogs": [],
         "versions": [],
+        "relations": [],
         **payload.model_dump(by_alias=True),
     }
     scenario["owner"] = scenario["owner"] or actor
@@ -341,6 +350,32 @@ async def list_scenarios(
 @app.get("/internal/v1/scenarios/{scenario_id}")
 async def scenario_detail(scenario_id: str, response: Response) -> Dict[str, Any]:
     return response_with_etag(response, get_scenario(scenario_id))
+
+
+@app.get("/internal/v1/scenarios/{scenario_id}/relations")
+async def scenario_relations(scenario_id: str) -> Dict[str, Any]:
+    return {"items": deepcopy(get_scenario(scenario_id).get("relations", []))}
+
+
+@app.post("/internal/v1/scenarios/{scenario_id}/relations", status_code=status.HTTP_201_CREATED)
+async def add_scenario_relation(scenario_id: str, payload: ScenarioRelation, response: Response, if_match: Optional[str] = Header(default=None, alias="If-Match"), role: Role = Depends(require_role("owner", "maintainer", "developer")), actor: str = Depends(actor_name)) -> Dict[str, Any]:
+    scenario = get_scenario(scenario_id)
+    require_match(scenario, if_match)
+    if payload.model_dump() in scenario.get("relations", []):
+        raise HTTPException(status_code=409, detail="scenario relation already exists")
+    previous_revision = scenario["revision"]
+    scenario.setdefault("relations", []).append(payload.model_dump())
+    touch(scenario, actor, "scenario.relation.added")
+    store.save(scenario, previous_revision)
+    store.event("validation.scenario.relation.added.v1", scenario)
+    return response_with_etag(response, scenario)
+
+
+@app.get("/internal/v1/projects/{project_id}/scenarios/impacted")
+async def impacted_scenarios(project_id: str, targets: List[str] = Query(default=[])) -> Dict[str, Any]:
+    target_set = set(targets)
+    items = [scenario for scenario in store.for_project(project_id) if scenario["status"] == "approved" and target_set & {relation["target"] for relation in scenario.get("relations", [])}]
+    return {"items": [store.public(item) for item in items], "fallbackRequired": not items}
 
 
 @app.patch("/internal/v1/scenarios/{scenario_id}")
