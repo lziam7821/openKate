@@ -481,6 +481,12 @@ async def classify_failure(failure_id: str, request: Request) -> JSONResponse:
     return proxy_error(response) if response.is_error else proxy_success(response)
 
 
+@app.post("/api/v1/runs/{run_id}/badcases", status_code=201)
+async def create_badcase(run_id: str, request: Request) -> JSONResponse:
+    response = await upstream(GOVERNANCE_SERVICE_URL, "POST", f"/internal/v1/runs/{run_id}/badcases", request, await request.json())
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
 @app.post("/api/v1/projects/{project_id}/assets", status_code=201)
 async def import_asset(project_id: str, request: Request) -> JSONResponse:
     try:

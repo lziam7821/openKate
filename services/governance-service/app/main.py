@@ -1,7 +1,7 @@
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from uuid import uuid4
 
 import psycopg
@@ -19,6 +19,11 @@ FailureCategory = Literal["product", "environment", "data", "executor", "unknown
 class ClassificationUpdate(BaseModel):
     category: FailureCategory
     reason: str = Field(min_length=1, max_length=2000)
+
+
+class BadCaseCreate(BaseModel):
+    evidence_refs: List[str] = Field(alias="evidenceRefs", min_length=1)
+    description: str = Field(min_length=1, max_length=4000)
 
 
 class FailureStore:
@@ -52,6 +57,7 @@ class FailureStore:
 
 
 store = FailureStore(os.getenv("OPENKATE_GOVERNANCE_DATABASE_URL"))
+badcases: Dict[str, Dict] = {}
 
 
 @app.get("/health")
@@ -70,3 +76,10 @@ async def failure_detail(failure_id: str) -> Dict:
 @app.post("/internal/v1/failures/{failure_id}/classification")
 async def classify_failure(failure_id: str, payload: ClassificationUpdate, x_openkate_actor: str = Header(default="local-user")) -> Dict:
     return store.classify(failure_id, payload, x_openkate_actor)
+
+
+@app.post("/internal/v1/runs/{run_id}/badcases", status_code=201)
+async def create_badcase(run_id: str, payload: BadCaseCreate, x_openkate_actor: str = Header(default="local-user")) -> Dict:
+    item = {"id": f"badcase_{uuid4().hex[:12]}", "runId": run_id, "evidenceRefs": payload.evidence_refs, "description": payload.description, "createdBy": x_openkate_actor, "createdAt": FailureStore.now()}
+    badcases[item["id"]] = item
+    return item
