@@ -483,8 +483,43 @@ async def classify_failure(failure_id: str, request: Request) -> JSONResponse:
 
 @app.post("/api/v1/runs/{run_id}/badcases", status_code=201)
 async def create_badcase(run_id: str, request: Request) -> JSONResponse:
-    response = await upstream(GOVERNANCE_SERVICE_URL, "POST", f"/internal/v1/runs/{run_id}/badcases", request, await request.json())
+    return await governance_request("POST", f"/internal/v1/runs/{run_id}/badcases", request)
+
+
+async def governance_request(method: str, path: str, request: Request) -> JSONResponse:
+    payload = None
+    if method == "POST":
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError:
+            pass
+    try:
+        response = await upstream(GOVERNANCE_SERVICE_URL, method, path, request, payload)
+    except httpx.HTTPError:
+        return JSONResponse(status_code=503, content={"error": {"code": "GOVERNANCE_SERVICE_UNAVAILABLE", "message": "governance service unavailable", "requestId": str(uuid4()), "details": {}}})
     return proxy_error(response) if response.is_error else proxy_success(response)
+
+
+@app.post("/api/v1/badcases/{badcase_id}/rule-drafts", status_code=201)
+async def create_rule_draft(badcase_id: str, request: Request) -> JSONResponse:
+    return await governance_request("POST", f"/internal/v1/badcases/{badcase_id}/rule-drafts", request)
+
+
+@app.post("/api/v1/rules/{rule_id}/{action}")
+async def rule_action(rule_id: str, action: str, request: Request) -> JSONResponse:
+    if action not in {"review", "approve", "publish", "rollback", "replay"}:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "rule action not found", "requestId": str(uuid4()), "details": {}}})
+    return await governance_request("POST", f"/internal/v1/rules/{rule_id}/{action}", request)
+
+
+@app.get("/api/v1/rules/{rule_id}")
+async def rule_detail(rule_id: str, request: Request) -> JSONResponse:
+    return await governance_request("GET", f"/internal/v1/rules/{rule_id}", request)
+
+
+@app.get("/api/v1/rules/{rule_id}/metrics")
+async def rule_metrics(rule_id: str, request: Request) -> JSONResponse:
+    return await governance_request("GET", f"/internal/v1/rules/{rule_id}/metrics", request)
 
 
 @app.post("/api/v1/projects/{project_id}/assets", status_code=201)

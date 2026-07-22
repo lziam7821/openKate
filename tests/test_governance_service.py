@@ -32,3 +32,33 @@ def test_badcase_keeps_run_evidence_and_manual_correction() -> None:
     assert response.status_code == 201
     badcase = response.json()
     assert governance_service.badcase_store.get(badcase["id"]) == badcase
+
+
+def test_high_risk_rule_requires_replay_two_approvals_and_can_rollback() -> None:
+    governance_service.badcase_store.items.clear()
+    governance_service.rule_store.items.clear()
+    badcase = client.post("/internal/v1/runs/run-payment/badcases", headers={"X-OpenKATE-Actor": "qa-ada"}, json={"evidenceRefs": ["asset://trace-1"], "description": "退款金额未校验"}).json()
+    draft = client.post(f"/internal/v1/badcases/{badcase['id']}/rule-drafts", headers={"X-OpenKATE-Actor": "qa-ada", "X-OpenKATE-Role": "developer"}, json={"scope": "payment refunds", "expectedEffect": "block invalid refund totals", "riskLevel": "high"})
+    assert draft.status_code == 201
+    rule_id = draft.json()["id"]
+    assert client.post(f"/internal/v1/rules/{rule_id}/review", headers={"X-OpenKATE-Role": "reviewer"}, json={}).json()["status"] == "in_review"
+    assert client.post(f"/internal/v1/rules/{rule_id}/approve", headers={"X-OpenKATE-Role": "reviewer", "X-OpenKATE-Actor": "reviewer-1"}).json()["status"] == "in_review"
+    approved = client.post(f"/internal/v1/rules/{rule_id}/approve", headers={"X-OpenKATE-Role": "maintainer", "X-OpenKATE-Actor": "reviewer-2"})
+    assert approved.json()["status"] == "approved"
+    replay = client.post(f"/internal/v1/rules/{rule_id}/replay", headers={"X-OpenKATE-Role": "reviewer"}, json={"runIds": ["run-a", "run-a", "run-b"]})
+    assert replay.json()["runIds"] == ["run-a", "run-b"]
+    published = client.post(f"/internal/v1/rules/{rule_id}/publish", headers={"X-OpenKATE-Role": "maintainer"})
+    assert published.json()["activeVersion"] == 1
+    assert client.get(f"/internal/v1/rules/{rule_id}/metrics").json()["hitRate"] == 1
+    assert client.post(f"/internal/v1/rules/{rule_id}/rollback", headers={"X-OpenKATE-Role": "maintainer"}).json()["activeVersion"] is None
+
+
+def test_rule_author_cannot_approve_and_revisions_are_immutable() -> None:
+    governance_service.badcase_store.items.clear()
+    governance_service.rule_store.items.clear()
+    badcase = client.post("/internal/v1/runs/run-1/badcases", headers={"X-OpenKATE-Actor": "author"}, json={"evidenceRefs": ["asset://trace-1"], "description": "税率显示错误"}).json()
+    rule_id = client.post(f"/internal/v1/badcases/{badcase['id']}/rule-drafts", headers={"X-OpenKATE-Actor": "author", "X-OpenKATE-Role": "developer"}, json={"scope": "invoices", "expectedEffect": "validate tax", "riskLevel": "low"}).json()["id"]
+    client.post(f"/internal/v1/rules/{rule_id}/review", headers={"X-OpenKATE-Role": "reviewer"}, json={})
+    assert client.post(f"/internal/v1/rules/{rule_id}/approve", headers={"X-OpenKATE-Role": "reviewer", "X-OpenKATE-Actor": "author"}).status_code == 403
+    revised = client.post(f"/internal/v1/rules/{rule_id}/review", headers={"X-OpenKATE-Role": "reviewer", "X-OpenKATE-Actor": "reviewer"}, json={"decision": "changes_requested", "content": "Validate tax rate against invoice country."})
+    assert [item["version"] for item in revised.json()["versions"]] == [1, 2]
