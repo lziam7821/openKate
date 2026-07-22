@@ -77,7 +77,7 @@ def test_health_catalog_covers_domain_services_and_workers() -> None:
     assert set(gateway_service.SERVICE_CATALOG) == {
         "project-service", "validation-service", "report-service", "execution-service", "workflow-service",
         "asset-service", "agent-service", "governance-service", "connector-service",
-        "executor-ui", "executor-api", "executor-state",
+        "executor-ui", "executor-api", "executor-state", "executor-mobile",
     }
 
 

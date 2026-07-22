@@ -79,6 +79,7 @@ services:
       OPENKATE_EXECUTOR_UI_URL: http://executor-ui:8011
       OPENKATE_EXECUTOR_API_URL: http://executor-api:8012
       OPENKATE_EXECUTOR_STATE_URL: http://executor-state:8013
+      OPENKATE_EXECUTOR_MOBILE_URL: http://executor-mobile:8014
       OPENKATE_JWT_SECRET: ${OPENKATE_JWT_SECRET:-local-development-secret-change-before-production}
       OPENKATE_OIDC_ISSUER: ${OPENKATE_OIDC_ISSUER:-}
       OPENKATE_OIDC_AUDIENCE: ${OPENKATE_OIDC_AUDIENCE:-}
@@ -183,6 +184,7 @@ services:
       OPENKATE_EXECUTOR_UI_URL: http://executor-ui:8011
       OPENKATE_EXECUTOR_API_URL: http://executor-api:8012
       OPENKATE_EXECUTOR_STATE_URL: http://executor-state:8013
+      OPENKATE_EXECUTOR_MOBILE_URL: http://executor-mobile:8014
       OPENKATE_TEMPORAL_ADDRESS: temporal:7233
       OPENKATE_TEMPORAL_NAMESPACE: openkate
       OPENKATE_TEMPORAL_ENABLED: "true"
@@ -244,6 +246,18 @@ services:
       OPENKATE_ASSET_SERVICE_URL: http://asset-service:8006
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8013"]
     expose: ["8013"]
+    profiles: [executors]
+
+  executor-mobile:
+    build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: workers/executor-mobile}}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/workers/executor-mobile
+      OPENKATE_APPIUM_URL: ${OPENKATE_APPIUM_URL:-}
+      OPENKATE_ARTIFACT_DIR: /artifacts
+      OPENKATE_ASSET_SERVICE_URL: http://asset-service:8006
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8014"]
+    expose: ["8014"]
+    volumes: ["execution_artifacts:/artifacts"]
     profiles: [executors]
 
   web:

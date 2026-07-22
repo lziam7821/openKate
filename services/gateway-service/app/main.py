@@ -24,6 +24,7 @@ CONNECTOR_SERVICE_URL = os.getenv("OPENKATE_CONNECTOR_SERVICE_URL", "http://127.
 EXECUTOR_UI_URL = os.getenv("OPENKATE_EXECUTOR_UI_URL", "http://127.0.0.1:8011")
 EXECUTOR_API_URL = os.getenv("OPENKATE_EXECUTOR_API_URL", "http://127.0.0.1:8012")
 EXECUTOR_STATE_URL = os.getenv("OPENKATE_EXECUTOR_STATE_URL", "http://127.0.0.1:8013")
+EXECUTOR_MOBILE_URL = os.getenv("OPENKATE_EXECUTOR_MOBILE_URL", "http://127.0.0.1:8014")
 SERVICE_CATALOG = {
     "project-service": PROJECT_SERVICE_URL, "validation-service": VALIDATION_SERVICE_URL,
     "report-service": REPORT_SERVICE_URL, "execution-service": EXECUTION_SERVICE_URL,
@@ -31,6 +32,7 @@ SERVICE_CATALOG = {
     "agent-service": AGENT_SERVICE_URL, "governance-service": GOVERNANCE_SERVICE_URL,
     "connector-service": CONNECTOR_SERVICE_URL, "executor-ui": EXECUTOR_UI_URL,
     "executor-api": EXECUTOR_API_URL, "executor-state": EXECUTOR_STATE_URL,
+    "executor-mobile": EXECUTOR_MOBILE_URL,
 }
 rate_windows: Dict[str, deque[float]] = defaultdict(deque)
 

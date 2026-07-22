@@ -126,7 +126,8 @@ def test_capability_discovery_registers_workers_and_missing_channels(monkeypatch
     items = {item["channel"]: item for item in response.json()["items"]}
     assert items["api"]["worker"] == "executor-api"
     assert items["api"]["sdkVersion"] == "1.0"
-    assert items["mobile"]["status"] == "unavailable"
+    assert items["mobile"]["worker"] == "executor-mobile"
+    assert items["quality"]["status"] == "unavailable"
 
 
 def test_capability_discovery_rejects_incompatible_worker_contract(monkeypatch) -> None:

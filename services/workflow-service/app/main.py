@@ -21,6 +21,7 @@ EXECUTOR_URLS = {
     "ui": os.getenv("OPENKATE_EXECUTOR_UI_URL", "http://127.0.0.1:8011"),
     "api": os.getenv("OPENKATE_EXECUTOR_API_URL", "http://127.0.0.1:8012"),
     "state": os.getenv("OPENKATE_EXECUTOR_STATE_URL", "http://127.0.0.1:8013"),
+    "mobile": os.getenv("OPENKATE_EXECUTOR_MOBILE_URL", "http://127.0.0.1:8014"),
 }
 active_tasks: Dict[str, asyncio.Task[None]] = {}
 TEMPORAL_ENABLED = os.getenv("OPENKATE_TEMPORAL_ENABLED", "false").lower() == "true"

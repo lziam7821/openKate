@@ -25,6 +25,7 @@ def load(name: str, relative_path: str):
 api_executor = load("api_executor", "workers/executor-api/app/main.py")
 state_executor = load("state_executor", "workers/executor-state/app/main.py")
 ui_executor = load("ui_executor", "workers/executor-ui/app/main.py")
+mobile_executor = load("mobile_executor", "workers/executor-mobile/app/main.py")
 
 
 def test_api_executor_calls_real_http_transport_transfers_variable_and_redacts_evidence() -> None:
@@ -165,3 +166,43 @@ def test_state_executor_is_parameterized_read_only_and_never_returns_credentials
     with pytest.raises(HTTPException) as error:
         state_executor.execute_state(mutation, lambda dsn, options: FakeConnection())
     assert error.value.status_code == 422
+
+
+def test_mobile_executor_collects_screenshot_and_page_source_with_device_actions(monkeypatch, tmp_path) -> None:
+    class Element:
+        text = "Order created"
+
+        def clear(self):
+            return None
+
+        def send_keys(self, value):
+            assert value == "SKU-1"
+
+        def click(self):
+            return None
+
+    class Driver:
+        page_source = "<hierarchy/>"
+
+        def find_element(self, by, selector):
+            assert by == "id"
+            assert selector in {"sku", "submit", "result"}
+            return Element()
+
+        def get_screenshot_as_png(self):
+            return b"png"
+
+        def quit(self):
+            return None
+
+    monkeypatch.setenv("OPENKATE_ARTIFACT_DIR", str(tmp_path))
+    request = ExecutorRequest.model_validate({"runId": "run-mobile", "stepId": "checkout", "action": "sequence", "input": {"capabilities": {"appium:deviceName": "Pixel"}, "actions": [{"type": "fill", "by": "id", "selector": "sku", "value": "SKU-1"}, {"type": "tap", "by": "id", "selector": "submit"}, {"type": "extractText", "by": "id", "selector": "result", "saveAs": "message"}]}})
+    result = asyncio.run(mobile_executor.execute_mobile(request, lambda _: Driver()))
+    assert result.output == {"message": "Order created"}
+    assert result.environment["device"] == "Pixel"
+    assert all(Path(path).is_file() for path in result.evidence_refs)
+
+
+def test_mobile_executor_is_unavailable_without_appium_endpoint(monkeypatch) -> None:
+    monkeypatch.delenv("OPENKATE_APPIUM_URL", raising=False)
+    assert asyncio.run(mobile_executor.health())["status"] == "unavailable"
