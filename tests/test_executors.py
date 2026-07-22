@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -64,6 +65,19 @@ def test_api_and_ui_executors_enforce_project_allowlist() -> None:
     with pytest.raises(HTTPException) as ui_error:
         asyncio.run(ui_executor.execute_ui(request))
     assert ui_error.value.status_code == 403
+
+
+def test_api_executor_runs_graphql_requests_and_asserts_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.headers["Content-Type"] == "application/json"
+        assert json.loads(request.content) == {"query": "query Product($sku: String!) { product(sku: $sku) { name } }", "variables": {"sku": "SKU-1"}, "operationName": None}
+        return httpx.Response(200, json={"data": {"product": None}, "errors": [{"message": "not found"}]})
+
+    request = ExecutorRequest.model_validate({"runId": "run-graphql", "stepId": "product", "action": "graphql", "allowedHosts": ["catalog.test"], "input": {"url": "https://catalog.test/graphql", "query": "query Product($sku: String!) { product(sku: $sku) { name } }", "variables": {"sku": "{{ sku }}"}, "assertions": [{"path": "body.errors.0.message", "operator": "equals", "expected": "not found"}]}, "variables": {"sku": "SKU-1"}})
+    result = asyncio.run(api_executor.execute_api(request, httpx.MockTransport(handler)))
+    assert result.environment["executor"] == "api.graphql"
+    assert result.assertions[0]["passed"] is True
 
 
 class CheckoutHandler(BaseHTTPRequestHandler):

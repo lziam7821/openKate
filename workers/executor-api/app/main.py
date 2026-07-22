@@ -15,10 +15,16 @@ async def execute_api(request: ExecutorRequest, transport: Optional[httpx.AsyncB
     payload = render_templates(request.input, request.variables)
     url = str(payload.get("url", ""))
     assert_allowed_url(url, request.allowed_hosts)
-    method = str(payload.get("method", "GET")).upper()
-    headers = payload.get("headers", {})
+    graphql = request.action == "graphql"
+    if graphql and not isinstance(payload.get("query"), str):
+        raise HTTPException(status_code=422, detail="GraphQL query is required")
+    method = "POST" if graphql else str(payload.get("method", "GET")).upper()
+    headers = dict(payload.get("headers", {}))
+    body = {"query": payload["query"], "variables": payload.get("variables", {}), "operationName": payload.get("operationName")} if graphql else payload.get("json")
+    if graphql:
+        headers.setdefault("Content-Type", "application/json")
     async with httpx.AsyncClient(transport=transport, timeout=request.timeout_ms / 1000) as client:
-        response = await client.request(method, url, headers=headers, json=payload.get("json"), params=payload.get("params"))
+        response = await client.request(method, url, headers=headers, json=body, params=payload.get("params"))
     try:
         body: Any = response.json()
     except ValueError:
@@ -30,17 +36,17 @@ async def execute_api(request: ExecutorRequest, transport: Optional[httpx.AsyncB
     return ExecutorResult(
         status="completed",
         output=actual,
-        inputSummary=redact({"method": method, "url": url, "headers": headers, "json": payload.get("json")}),
+        inputSummary=redact({"protocol": "graphql" if graphql else "http", "method": method, "url": url, "headers": headers, "json": body}),
         outputSummary=redact(actual),
         assertions=assertions,
-        evidenceRefs=[store_evidence(request.run_id, request.step_id, "http", json.dumps({"request": redact({"method": method, "url": url, "headers": headers, "json": payload.get("json")}), "response": redact(actual)}).encode(), "application/json")],
-        environment={"executor": "api.http", "httpVersion": response.http_version},
+        evidenceRefs=[store_evidence(request.run_id, request.step_id, "graphql" if graphql else "http", json.dumps({"request": redact({"method": method, "url": url, "headers": headers, "json": body}), "response": redact(actual)}).encode(), "application/json")],
+        environment={"executor": "api.graphql" if graphql else "api.http", "httpVersion": response.http_version},
     )
 
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"worker": "executor-api", "status": "ready", "capabilities": ["api.http"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
+    return {"worker": "executor-api", "status": "ready", "capabilities": ["api.http", "api.graphql"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
 
 
 @app.post("/execute", response_model=ExecutorResult)
