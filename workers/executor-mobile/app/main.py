@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -41,6 +42,7 @@ async def execute_mobile(request: ExecutorRequest, driver_factory: Optional[Call
     artifact_root.mkdir(parents=True, exist_ok=True)
     screenshot = artifact_root / "screenshot.png"
     page_source = artifact_root / "page-source.xml"
+    device_log = artifact_root / "device-log.json"
     output: Dict[str, Any] = {}
     try:
         for action in payload.get("actions", []):
@@ -58,6 +60,8 @@ async def execute_mobile(request: ExecutorRequest, driver_factory: Optional[Call
                 raise HTTPException(status_code=422, detail=f"unsupported mobile action: {action_type}")
         screenshot.write_bytes(await asyncio.to_thread(driver.get_screenshot_as_png))
         page_source.write_text(await asyncio.to_thread(lambda: driver.page_source), encoding="utf-8")
+        if hasattr(driver, "get_log"):
+            device_log.write_text(json.dumps(await asyncio.to_thread(driver.get_log, "logcat")), encoding="utf-8")
     finally:
         await asyncio.to_thread(driver.quit)
     return ExecutorResult(
@@ -65,7 +69,7 @@ async def execute_mobile(request: ExecutorRequest, driver_factory: Optional[Call
         output=output,
         inputSummary=redact({"capabilities": capabilities, "actions": payload.get("actions", [])}),
         outputSummary=redact(output),
-        evidenceRefs=[store_file_evidence(request.run_id, request.step_id, "screenshot", screenshot, "image/png"), store_file_evidence(request.run_id, request.step_id, "page-source", page_source, "application/xml")],
+        evidenceRefs=[store_file_evidence(request.run_id, request.step_id, "screenshot", screenshot, "image/png"), store_file_evidence(request.run_id, request.step_id, "page-source", page_source, "application/xml")] + ([store_file_evidence(request.run_id, request.step_id, "device-log", device_log, "application/json")] if device_log.exists() else []),
         environment={"executor": "mobile.appium", "device": capabilities.get("appium:deviceName") or capabilities.get("deviceName")},
     )
 

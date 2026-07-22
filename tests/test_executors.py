@@ -306,6 +306,10 @@ def test_mobile_executor_collects_screenshot_and_page_source_with_device_actions
         def get_screenshot_as_png(self):
             return b"png"
 
+        def get_log(self, kind):
+            assert kind == "logcat"
+            return [{"message": "activity started"}]
+
         def quit(self):
             return None
 
@@ -314,6 +318,7 @@ def test_mobile_executor_collects_screenshot_and_page_source_with_device_actions
     result = asyncio.run(mobile_executor.execute_mobile(request, lambda _: Driver()))
     assert result.output == {"message": "Order created"}
     assert result.environment["device"] == "Pixel"
+    assert len(result.evidence_refs) == 3
     assert all(Path(path).is_file() for path in result.evidence_refs)
 
 
