@@ -78,6 +78,14 @@ def test_owner_can_create_quality_policy() -> None:
     assert response.json()["thresholds"]["http_req_duration.p95"] == 500
 
 
+def test_secret_reference_directory_never_accepts_secret_values() -> None:
+    headers = {"X-OpenKATE-Role": "owner"}
+    project = client.post("/internal/v1/workspaces/workspace_demo/projects", headers=headers, json={"name": "Secrets"}).json()
+    response = client.post(f"/internal/v1/projects/{project['id']}/secret-references", headers=headers, json={"name": "staging-db", "reference": "vault://databases/staging", "purpose": "PostgreSQL read-only"})
+    assert response.status_code == 201
+    assert "password" not in str(client.get(f"/internal/v1/projects/{project['id']}/secret-references", headers=headers).json()).lower()
+
+
 def test_owner_can_create_workspace_and_manage_project_members_with_actor_audit() -> None:
     headers = {"X-OpenKATE-Role": "owner", "X-OpenKATE-Actor": "owner-ada"}
     workspace = client.post("/internal/v1/workspaces", headers=headers, json={"name": "Payments"})

@@ -74,6 +74,12 @@ class QualityPolicyCreate(BaseModel):
     thresholds: Dict[str, float] = Field(default_factory=dict)
 
 
+class SecretReferenceCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    reference: str = Field(min_length=3, max_length=500)
+    purpose: str = Field(min_length=2, max_length=200)
+
+
 store = ProjectStore(os.getenv("OPENKATE_PROJECT_DATABASE_URL"))
 
 
@@ -262,6 +268,24 @@ async def create_quality_policy(project_id: str, payload: QualityPolicyCreate, r
     if policy is None:
         raise HTTPException(status_code=404, detail="project not found")
     return policy
+
+
+@app.post("/internal/v1/projects/{project_id}/secret-references", status_code=status.HTTP_201_CREATED)
+async def create_secret_reference(project_id: str, payload: SecretReferenceCreate, role: Role = Depends(require_write), actor: str = Depends(actor_name)) -> Dict[str, object]:
+    require_project_role(project_id, actor, {"owner", "maintainer"})
+    item = store.create_secret_reference(project_id, payload.model_dump(), actor)
+    if item is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return item
+
+
+@app.get("/internal/v1/projects/{project_id}/secret-references")
+async def list_secret_references(project_id: str, actor: str = Depends(actor_name)) -> List[Dict[str, object]]:
+    require_project_role(project_id, actor, {"owner", "maintainer"})
+    items = store.list_secret_references(project_id)
+    if items is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return items
 
 
 @app.get("/internal/v1/projects/{project_id}/members")

@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS project_schema.secret_references (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project_schema.projects(id) ON DELETE CASCADE, name TEXT NOT NULL, reference TEXT NOT NULL, purpose TEXT NOT NULL);

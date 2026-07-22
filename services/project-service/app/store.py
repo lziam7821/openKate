@@ -16,6 +16,7 @@ class ProjectStore:
         self.device_pools: Dict[str, List[Dict[str, Any]]] = {}
         self.connection_profiles: Dict[str, List[Dict[str, Any]]] = {}
         self.quality_policies: Dict[str, List[Dict[str, Any]]] = {}
+        self.secret_references: Dict[str, List[Dict[str, Any]]] = {}
         self.members: Dict[str, List[Dict[str, str]]] = {}
         self.audit_logs: Dict[str, List[Dict[str, str]]] = {}
         self.outbox_events: List[Dict[str, Any]] = []
@@ -272,6 +273,27 @@ class ProjectStore:
             row = connection.execute("INSERT INTO project_schema.quality_policies (id, project_id, name, thresholds) VALUES (%s, %s, %s, %s) RETURNING id, name, thresholds", (policy["id"], project_id, name, Jsonb(thresholds))).fetchone()
             self._insert_audit(connection, project_id, actor, "quality_policy.created")
         return {"id": row["id"], "name": row["name"], "thresholds": row["thresholds"]}
+
+    def create_secret_reference(self, project_id: str, payload: Dict[str, str], actor: str) -> Optional[Dict[str, Any]]:
+        if self.get_project(project_id) is None:
+            return None
+        item = {"id": f"secret_ref_{uuid4().hex[:12]}", **payload}
+        if self.database_url is None:
+            self.secret_references.setdefault(project_id, []).append(item)
+            self.audit(project_id, actor, "secret_reference.created")
+            return item
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute("INSERT INTO project_schema.secret_references (id, project_id, name, reference, purpose) VALUES (%s, %s, %s, %s, %s) RETURNING id, name, reference, purpose", (item["id"], project_id, item["name"], item["reference"], item["purpose"])).fetchone()
+            self._insert_audit(connection, project_id, actor, "secret_reference.created")
+        return dict(row)
+
+    def list_secret_references(self, project_id: str) -> Optional[List[Dict[str, Any]]]:
+        if self.get_project(project_id) is None:
+            return None
+        if self.database_url is None:
+            return self.secret_references.get(project_id, [])
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            return [dict(row) for row in connection.execute("SELECT id, name, reference, purpose FROM project_schema.secret_references WHERE project_id = %s ORDER BY name", (project_id,)).fetchall()]
 
     def update_environment(self, project_id: str, environment_id: str, updates: Dict[str, Any], actor: str) -> Optional[Dict[str, Any]]:
         current = self.get_environment(project_id, environment_id)
