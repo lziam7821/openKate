@@ -502,6 +502,37 @@ async def asset_detail(asset_id: str, request: Request) -> JSONResponse:
     return proxy_error(response) if response.is_error else proxy_success(response)
 
 
+async def generation_request(method: str, path: str, request: Request) -> JSONResponse:
+    try:
+        payload = await request.json() if method == "POST" else None
+        response = await upstream(AGENT_SERVICE_URL, method, path, request, payload)
+    except httpx.HTTPError:
+        return JSONResponse(status_code=503, content={"error": {"code": "AGENT_SERVICE_UNAVAILABLE", "message": "agent service unavailable", "requestId": str(uuid4()), "details": {}}})
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
+@app.post("/api/v1/projects/{project_id}/scenario-generations", status_code=202)
+async def create_generation(project_id: str, request: Request) -> JSONResponse:
+    return await generation_request("POST", f"/internal/v1/projects/{project_id}/scenario-generations", request)
+
+
+@app.get("/api/v1/scenario-generations/{task_id}")
+async def generation_detail(task_id: str, request: Request) -> JSONResponse:
+    return await generation_request("GET", f"/internal/v1/scenario-generations/{task_id}", request)
+
+
+@app.get("/api/v1/scenario-generations/{task_id}/events")
+async def generation_events(task_id: str, request: Request) -> JSONResponse:
+    return await generation_request("GET", f"/internal/v1/scenario-generations/{task_id}/events", request)
+
+
+@app.post("/api/v1/scenario-generations/{task_id}/{action}")
+async def generation_action(task_id: str, action: str, request: Request) -> JSONResponse:
+    if action not in {"review", "accept", "reject"}:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "generation action not found", "requestId": str(uuid4()), "details": {}}})
+    return await generation_request("POST", f"/internal/v1/scenario-generations/{task_id}/{action}", request)
+
+
 @app.post("/api/v1/runs/{run_id}/cancel")
 async def cancel_execution_run(run_id: str, request: Request) -> JSONResponse:
     try:
