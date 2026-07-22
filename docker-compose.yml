@@ -160,7 +160,9 @@ services:
   connector-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/connector-service}}
     profiles: [core]
-    environment: {PYTHONPATH: /app/packages/python:/app/services/connector-service}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/connector-service
+      OPENKATE_CONNECTOR_DATABASE_URL: postgresql://connector_runtime:change-me@postgres:5432/openkate
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8009"]
     expose: ["8009"]
 

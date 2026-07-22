@@ -1,0 +1,36 @@
+import hashlib
+import hmac
+import importlib.util
+import json
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+
+MODULE_PATH = Path(__file__).parents[1] / "services" / "connector-service" / "app" / "main.py"
+spec = importlib.util.spec_from_file_location("connector_service", MODULE_PATH)
+assert spec and spec.loader
+connector_service = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(connector_service)
+client = TestClient(connector_service.app)
+
+
+def test_github_webhook_validates_signature_and_deduplicates(monkeypatch) -> None:
+    connector_service.store.connectors.clear()
+    connector_service.store.deliveries.clear()
+    monkeypatch.setenv("OPENKATE_WEBHOOK_SECRETS", json.dumps({"vault://github-demo": "webhook-secret"}))
+    created = client.post("/internal/v1/projects/project-a/connectors", headers={"X-OpenKATE-Role": "maintainer"}, json={"provider": "github", "repository": "openkate/demo", "secretRef": "vault://github-demo"})
+    assert created.status_code == 201
+    body = b'{"action":"opened","pull_request":{"number":12}}'
+    signature = "sha256=" + hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
+    path = "/internal/v1/webhooks/github/project-a"
+    headers = {"X-Hub-Signature-256": signature, "X-GitHub-Delivery": "delivery-1", "Content-Type": "application/json"}
+    assert client.post(path, headers=headers, content=body).json()["status"] == "accepted"
+    assert client.post(path, headers=headers, content=body).json()["status"] == "duplicate"
+
+
+def test_webhook_rejects_invalid_signature() -> None:
+    connector_service.store.connectors.clear()
+    connector_service.store.connectors["connector_1"] = {"id": "connector_1", "projectId": "project-a", "provider": "gitlab", "repository": "openkate/demo", "secretRef": "vault://gitlab-demo", "createdAt": "now"}
+    response = client.post("/internal/v1/webhooks/gitlab/project-a", headers={"X-Gitlab-Token": "wrong", "X-Gitlab-Event-UUID": "delivery-2"}, content=b"{}")
+    assert response.status_code in {401, 503}

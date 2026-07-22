@@ -68,7 +68,7 @@ def decode_access_token(token: str) -> Dict[str, Any]:
 async def authenticate(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or str(uuid4())
     request.state.request_id = request_id
-    if request.url.path.startswith("/api/v1") and request.method != "OPTIONS":
+    if request.url.path.startswith("/api/v1") and not request.url.path.startswith("/api/v1/webhooks/") and request.method != "OPTIONS":
         authorization = request.headers.get("Authorization", "")
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer" or not token:
@@ -497,6 +497,30 @@ async def governance_request(method: str, path: str, request: Request) -> JSONRe
         response = await upstream(GOVERNANCE_SERVICE_URL, method, path, request, payload)
     except httpx.HTTPError:
         return JSONResponse(status_code=503, content={"error": {"code": "GOVERNANCE_SERVICE_UNAVAILABLE", "message": "governance service unavailable", "requestId": str(uuid4()), "details": {}}})
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
+async def connector_request(method: str, path: str, request: Request) -> JSONResponse:
+    try:
+        response = await upstream(CONNECTOR_SERVICE_URL, method, path, request, await request.json() if method == "POST" else None)
+    except httpx.HTTPError:
+        return JSONResponse(status_code=503, content={"error": {"code": "CONNECTOR_SERVICE_UNAVAILABLE", "message": "connector service unavailable", "requestId": str(uuid4()), "details": {}}})
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
+@app.post("/api/v1/projects/{project_id}/connectors", status_code=201)
+async def create_connector(project_id: str, request: Request) -> JSONResponse:
+    return await connector_request("POST", f"/internal/v1/projects/{project_id}/connectors", request)
+
+
+@app.post("/api/v1/webhooks/{provider}/{project_id}", status_code=202)
+async def connector_webhook(provider: str, project_id: str, request: Request) -> JSONResponse:
+    headers = {key: value for key, value in request.headers.items() if key.lower() in {"content-type", "x-hub-signature-256", "x-github-delivery", "x-gitlab-token", "x-gitlab-event-uuid"}}
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(f"{CONNECTOR_SERVICE_URL}/internal/v1/webhooks/{provider}/{project_id}", headers=headers, content=await request.body())
+    except httpx.HTTPError:
+        return JSONResponse(status_code=503, content={"error": {"code": "CONNECTOR_SERVICE_UNAVAILABLE", "message": "connector service unavailable", "requestId": str(uuid4()), "details": {}}})
     return proxy_error(response) if response.is_error else proxy_success(response)
 
 
