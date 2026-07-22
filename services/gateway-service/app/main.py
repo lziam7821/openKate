@@ -439,6 +439,39 @@ async def execution_run_events(run_id: str, request: Request) -> JSONResponse:
     return await execution_upstream("GET", f"/internal/v1/runs/{run_id}/events", request)
 
 
+async def report_request(path: str, request: Request) -> JSONResponse:
+    try:
+        response = await upstream(REPORT_SERVICE_URL, "GET", path, request)
+    except httpx.HTTPError:
+        return JSONResponse(status_code=503, content={"error": {"code": "REPORT_SERVICE_UNAVAILABLE", "message": "report service unavailable", "requestId": str(uuid4()), "details": {}}})
+    return proxy_error(response) if response.is_error else proxy_success(response)
+
+
+@app.get("/api/v1/runs/{run_id}/report")
+async def execution_report(run_id: str, request: Request) -> JSONResponse:
+    return await report_request(f"/internal/v1/runs/{run_id}/report", request)
+
+
+@app.get("/api/v1/runs/{run_id}/evidences")
+async def execution_evidences(run_id: str, request: Request) -> JSONResponse:
+    return await report_request(f"/internal/v1/runs/{run_id}/evidences", request)
+
+
+@app.get("/api/v1/runs/{run_id}/coverage")
+async def execution_coverage(run_id: str, request: Request) -> JSONResponse:
+    return await report_request(f"/internal/v1/runs/{run_id}/coverage", request)
+
+
+@app.get("/api/v1/runs/{run_id}/compare/{other_run_id}")
+async def execution_compare(run_id: str, other_run_id: str, request: Request) -> JSONResponse:
+    return await report_request(f"/internal/v1/runs/{run_id}/compare/{other_run_id}", request)
+
+
+@app.get("/api/v1/runs/{run_id}/exports/{format}")
+async def execution_export(run_id: str, format: str, request: Request) -> JSONResponse:
+    return await report_request(f"/internal/v1/runs/{run_id}/exports/{format}", request)
+
+
 @app.post("/api/v1/runs/{run_id}/cancel")
 async def cancel_execution_run(run_id: str, request: Request) -> JSONResponse:
     try:

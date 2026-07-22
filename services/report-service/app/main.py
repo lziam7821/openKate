@@ -1,8 +1,11 @@
 import os
+from html import escape
 from copy import deepcopy
 from typing import Any, Dict, List, Literal, Optional, Set
 
-from fastapi import FastAPI, Query
+import httpx
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 import psycopg
 from psycopg.rows import dict_row
@@ -84,6 +87,38 @@ class ReportStore:
 
 
 store = ReportStore(os.getenv("OPENKATE_REPORT_DATABASE_URL"))
+EXECUTION_SERVICE_URL = os.getenv("OPENKATE_EXECUTION_SERVICE_URL", "http://127.0.0.1:8004")
+
+
+def report_for(context: Dict[str, Any]) -> Dict[str, Any]:
+    run, plan = context["run"], context["plan"]
+    results = run["stepResults"]
+    missing = [item["stepId"] for item in results if not item.get("evidenceRefs")]
+    failures = [item for item in results if item["status"] == "failed"]
+    if run["status"] == "completed" and not missing:
+        outcome = "passed"
+    elif missing:
+        outcome = "inconclusive"
+    elif any(item.get("error", {}).get("category") in {"environment", "executor_unavailable"} for item in failures):
+        outcome = "blocked"
+    elif failures or run["status"] in {"failed", "canceled"}:
+        outcome = "failed"
+    else:
+        outcome = "inconclusive"
+    evidences = [{"stepId": item["stepId"], "ref": ref} for item in results for ref in item.get("evidenceRefs", [])]
+    return {"runId": run["id"], "scenarioId": run["scenarioId"], "scenarioVersion": run["scenarioVersion"], "planId": run["planId"], "outcome": outcome, "status": run["status"], "steps": [{"stepId": item["stepId"], "status": item["status"], "assertions": item.get("assertions", []), "evidenceRefs": item.get("evidenceRefs", []), "error": item.get("error"), "startedAt": item.get("startedAt"), "completedAt": item.get("completedAt")} for item in results], "evidences": evidences, "coverage": {"requiredSteps": len(plan["orderedStepIds"]), "coveredSteps": len(results) - len(missing), "missingEvidenceSteps": missing, "requiredEvidenceSatisfied": not missing}, "generatedAt": run.get("completedAt") or run["createdAt"]}
+
+
+async def run_report(run_id: str) -> Dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(f"{EXECUTION_SERVICE_URL}/internal/v1/runs/{run_id}/context")
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=503, detail="execution service unavailable") from error
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="execution run not found")
+    response.raise_for_status()
+    return report_for(response.json())
 
 
 @app.get("/health", tags=["system"])
@@ -127,3 +162,39 @@ async def list_scenarios(
     items.sort(key=lambda item: item.get("updatedAt", ""), reverse=True)
     start = (page - 1) * page_size
     return {"items": deepcopy(items[start : start + page_size]), "total": len(items), "page": page, "pageSize": page_size}
+
+
+@app.get("/internal/v1/runs/{run_id}/report")
+async def run_report_detail(run_id: str) -> Dict[str, Any]:
+    return await run_report(run_id)
+
+
+@app.get("/internal/v1/runs/{run_id}/evidences")
+async def run_evidences(run_id: str) -> Dict[str, Any]:
+    report = await run_report(run_id)
+    return {"runId": run_id, "items": report["evidences"]}
+
+
+@app.get("/internal/v1/runs/{run_id}/coverage")
+async def run_coverage(run_id: str) -> Dict[str, Any]:
+    report = await run_report(run_id)
+    return {"runId": run_id, **report["coverage"]}
+
+
+@app.get("/internal/v1/runs/{run_id}/compare/{other_run_id}")
+async def compare_runs(run_id: str, other_run_id: str) -> Dict[str, Any]:
+    current, other = await run_report(run_id), await run_report(other_run_id)
+    by_step = {item["stepId"]: item for item in other["steps"]}
+    return {"runId": run_id, "otherRunId": other_run_id, "outcome": {"from": other["outcome"], "to": current["outcome"]}, "steps": [{"stepId": item["stepId"], "from": by_step.get(item["stepId"], {}).get("status"), "to": item["status"], "evidenceDelta": len(item["evidenceRefs"]) - len(by_step.get(item["stepId"], {}).get("evidenceRefs", []))} for item in current["steps"]]}
+
+
+@app.get("/internal/v1/runs/{run_id}/exports/{format}")
+async def export_report(run_id: str, format: Literal["json", "html", "junit"]):
+    report = await run_report(run_id)
+    if format == "json":
+        return report
+    if format == "html":
+        rows = "".join(f"<li>{escape(item['stepId'])}: {escape(item['status'])}</li>" for item in report["steps"])
+        return PlainTextResponse(f"<html><body><h1>{escape(report['outcome'])}</h1><ul>{rows}</ul></body></html>", media_type="text/html", headers={"Content-Disposition": f'attachment; filename="{run_id}.html"'})
+    failures = "".join(f'<failure message="{escape((item.get("error") or {}).get("message", item["status"]))}" />' for item in report["steps"] if item["status"] != "completed")
+    return PlainTextResponse(f'<testsuite name="openkate" tests="{len(report["steps"])}" failures="{len([item for item in report["steps"] if item["status"] != "completed"])}"><testcase name="{escape(run_id)}">{failures}</testcase></testsuite>', media_type="application/xml", headers={"Content-Disposition": f'attachment; filename="{run_id}.xml"'})
