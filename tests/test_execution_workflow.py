@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -103,3 +104,40 @@ def test_workflow_does_not_replay_running_non_idempotent_activity() -> None:
     asyncio.run(run())
     assert len(failures) == 1
     assert "recovery_required" in failures[0]
+
+
+def test_workflow_executes_independent_steps_in_parallel() -> None:
+    state = context()
+    state["plan"]["steps"] = [
+        {"id": "left", "channel": "api", "action": "request", "dependsOn": [], "input": {}, "save": {}, "timeoutMs": 1000, "idempotent": True},
+        {"id": "right", "channel": "api", "action": "request", "dependsOn": [], "input": {}, "save": {}, "timeoutMs": 1000, "idempotent": True},
+    ]
+    state["plan"]["orderedStepIds"] = ["left", "right"]
+    state["run"]["stepResults"] = [{"stepId": "left", "status": "pending"}, {"stepId": "right", "status": "pending"}]
+    timeline = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/context"):
+            return httpx.Response(200, json=deepcopy(state))
+        if path.endswith("/start"):
+            step_id = path.split("/")[-2]
+            next(item for item in state["run"]["stepResults"] if item["stepId"] == step_id)["status"] = "running"
+            return httpx.Response(200, json={})
+        if path.endswith("/complete"):
+            step_id = path.split("/")[-2]
+            next(item for item in state["run"]["stepResults"] if item["stepId"] == step_id)["status"] = "completed"
+            if all(item["status"] == "completed" for item in state["run"]["stepResults"]):
+                state["run"]["status"] = "completed"
+            return httpx.Response(200, json={})
+        step_id = json.loads(request.content)["stepId"]
+        timeline.append(f"start:{step_id}")
+        await asyncio.sleep(0)
+        timeline.append(f"end:{step_id}")
+        return httpx.Response(200, json={"output": {}, "assertions": [], "evidenceRefs": []})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    asyncio.run(workflow_service.ScenarioExecutionWorkflow(client).run("run-1"))
+    asyncio.run(client.aclose())
+    assert set(timeline[:2]) == {"start:left", "start:right"}
+    assert state["run"]["status"] == "completed"

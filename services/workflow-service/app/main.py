@@ -45,57 +45,53 @@ class ScenarioExecutionWorkflow:
         context = await self._context(run_id, client)
         plan = context["plan"]
         steps = {step["id"]: step for step in plan["steps"]}
-        for step_id in plan["orderedStepIds"]:
+        while True:
             context = await self._context(run_id, client)
             run = context["run"]
             if run["status"] != "running":
                 return
-            result = next(item for item in run["stepResults"] if item["stepId"] == step_id)
-            if result["status"] == "completed":
-                continue
-            step = steps[step_id]
-            if result["status"] == "running" and not step["idempotent"]:
-                await self._fail(run_id, step_id, "recovery_required", "non-idempotent activity requires manual recovery", client)
+            results = {item["stepId"]: item for item in run["stepResults"]}
+            ready = [step_id for step_id in plan["orderedStepIds"] if results[step_id]["status"] != "completed" and all(results[dependency]["status"] == "completed" for dependency in steps[step_id]["dependsOn"])]
+            if not ready:
                 return
-            if result["status"] == "pending":
-                response = await client.post(f"{EXECUTION_SERVICE_URL}/internal/v1/runs/{run_id}/steps/{step_id}/start")
-                if response.is_error:
-                    await self._fail(run_id, step_id, "dependency_error", self._message(response), client)
-                    return
+            succeeded = await asyncio.gather(*(self._run_step(run_id, steps[step_id], results[step_id], run, client) for step_id in ready))
+            if not all(succeeded):
+                return
 
-            executor_request = {
-                "runId": run_id,
-                "stepId": step_id,
-                "action": step["action"],
-                "input": {**step["input"], **({"deviceId": run["deviceId"]} if step["channel"] == "mobile" else {})},
-                "variables": run["_variables"],
-                "allowedHosts": run.get("allowedHosts", []),
-                "timeoutMs": step["timeoutMs"],
-            }
-            attempts = 3 if step["idempotent"] else 1
-            response: Optional[httpx.Response] = None
-            for attempt in range(attempts):
-                try:
-                    response = await client.post(f"{EXECUTOR_URLS[step['channel']]}/execute", json=executor_request)
-                except httpx.HTTPError as error:
-                    if attempt + 1 == attempts:
-                        await self._fail(run_id, step_id, "executor_unavailable", str(error), client)
-                        return
-                    continue
-                if response.is_success or response.status_code < 500:
-                    break
-            assert response is not None
+    async def _run_step(self, run_id: str, step: Dict[str, Any], result: Dict[str, Any], run: Dict[str, Any], client: httpx.AsyncClient) -> bool:
+        step_id = step["id"]
+        if result["status"] == "running" and not step["idempotent"]:
+            await self._fail(run_id, step_id, "recovery_required", "non-idempotent activity requires manual recovery", client)
+            return False
+        if result["status"] == "pending":
+            response = await client.post(f"{EXECUTION_SERVICE_URL}/internal/v1/runs/{run_id}/steps/{step_id}/start")
             if response.is_error:
-                await self._fail(run_id, step_id, "executor_error", self._message(response), client)
-                return
-            executor_result = response.json()
-            completed = await client.post(
-                f"{EXECUTION_SERVICE_URL}/internal/v1/runs/{run_id}/steps/{step_id}/complete",
-                json={"output": executor_result.get("output", {}), "assertions": executor_result.get("assertions", []), "evidenceRefs": executor_result.get("evidenceRefs", [])},
-            )
-            if completed.is_error:
-                await self._fail(run_id, step_id, "persistence_error", self._message(completed), client)
-                return
+                await self._fail(run_id, step_id, "dependency_error", self._message(response), client)
+                return False
+
+        executor_request = {"runId": run_id, "stepId": step_id, "action": step["action"], "input": {**step["input"], **({"deviceId": run["deviceId"]} if step["channel"] == "mobile" else {})}, "variables": run["_variables"], "allowedHosts": run.get("allowedHosts", []), "timeoutMs": step["timeoutMs"]}
+        attempts = 3 if step["idempotent"] else 1
+        response: Optional[httpx.Response] = None
+        for attempt in range(attempts):
+            try:
+                response = await client.post(f"{EXECUTOR_URLS[step['channel']]}/execute", json=executor_request)
+            except httpx.HTTPError as error:
+                if attempt + 1 == attempts:
+                    await self._fail(run_id, step_id, "executor_unavailable", str(error), client)
+                    return False
+                continue
+            if response.is_success or response.status_code < 500:
+                break
+        assert response is not None
+        if response.is_error:
+            await self._fail(run_id, step_id, "executor_error", self._message(response), client)
+            return False
+        executor_result = response.json()
+        completed = await client.post(f"{EXECUTION_SERVICE_URL}/internal/v1/runs/{run_id}/steps/{step_id}/complete", json={"output": executor_result.get("output", {}), "assertions": executor_result.get("assertions", []), "evidenceRefs": executor_result.get("evidenceRefs", [])})
+        if completed.is_error:
+            await self._fail(run_id, step_id, "persistence_error", self._message(completed), client)
+            return False
+        return True
 
     @staticmethod
     async def _context(run_id: str, client: httpx.AsyncClient) -> Dict[str, Any]:
