@@ -57,7 +57,52 @@ class FailureStore:
 
 
 store = FailureStore(os.getenv("OPENKATE_GOVERNANCE_DATABASE_URL"))
-badcases: Dict[str, Dict] = {}
+
+
+class BadCaseStore:
+    def __init__(self, database_url: Optional[str] = None) -> None:
+        self.database_url = database_url
+        self.items: Dict[str, Dict] = {}
+
+    def create(self, run_id: str, payload: BadCaseCreate, actor: str) -> Dict:
+        item = {
+            "id": f"badcase_{uuid4().hex[:12]}",
+            "runId": run_id,
+            "evidenceRefs": payload.evidence_refs,
+            "description": payload.description,
+            "createdBy": actor,
+            "createdAt": FailureStore.now(),
+        }
+        self.items[item["id"]] = item
+        if self.database_url:
+            with psycopg.connect(self.database_url) as connection:
+                connection.execute(
+                    "INSERT INTO governance_schema.badcases (id, run_id, evidence_refs, description, created_by, created_at) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (item["id"], run_id, Jsonb(payload.evidence_refs), payload.description, actor, item["createdAt"]),
+                )
+        return deepcopy(item)
+
+    def get(self, badcase_id: str) -> Optional[Dict]:
+        if badcase_id in self.items or not self.database_url:
+            return deepcopy(self.items.get(badcase_id))
+        with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
+            row = connection.execute(
+                "SELECT id, run_id, evidence_refs, description, created_by, created_at FROM governance_schema.badcases WHERE id = %s",
+                (badcase_id,),
+            ).fetchone()
+        if row:
+            self.items[badcase_id] = {
+                "id": row["id"],
+                "runId": row["run_id"],
+                "evidenceRefs": row["evidence_refs"],
+                "description": row["description"],
+                "createdBy": row["created_by"],
+                "createdAt": row["created_at"].isoformat(),
+            }
+        return deepcopy(self.items.get(badcase_id))
+
+
+badcase_store = BadCaseStore(os.getenv("OPENKATE_GOVERNANCE_DATABASE_URL"))
 
 
 @app.get("/health")
@@ -80,6 +125,4 @@ async def classify_failure(failure_id: str, payload: ClassificationUpdate, x_ope
 
 @app.post("/internal/v1/runs/{run_id}/badcases", status_code=201)
 async def create_badcase(run_id: str, payload: BadCaseCreate, x_openkate_actor: str = Header(default="local-user")) -> Dict:
-    item = {"id": f"badcase_{uuid4().hex[:12]}", "runId": run_id, "evidenceRefs": payload.evidence_refs, "description": payload.description, "createdBy": x_openkate_actor, "createdAt": FailureStore.now()}
-    badcases[item["id"]] = item
-    return item
+    return badcase_store.create(run_id, payload, x_openkate_actor)

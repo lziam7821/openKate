@@ -20,3 +20,15 @@ def test_failure_classification_keeps_auditable_correction_history() -> None:
     corrected = client.post(path, headers={"X-OpenKATE-Actor": "reviewer-lin"}, json={"category": "product", "reason": "payment callback regression"})
     assert corrected.json()["category"] == "product"
     assert [(item["actor"], item["from"], item["to"]) for item in corrected.json()["audit"]] == [("qa-ada", "unknown", "environment"), ("reviewer-lin", "environment", "product")]
+
+
+def test_badcase_keeps_run_evidence_and_manual_correction() -> None:
+    governance_service.badcase_store.items.clear()
+    response = client.post(
+        "/internal/v1/runs/run-payment/badcases",
+        headers={"X-OpenKATE-Actor": "qa-ada"},
+        json={"evidenceRefs": ["asset://trace-1"], "description": "退款金额未校验"},
+    )
+    assert response.status_code == 201
+    badcase = response.json()
+    assert governance_service.badcase_store.get(badcase["id"]) == badcase
