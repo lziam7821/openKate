@@ -226,6 +226,17 @@ def test_state_executor_polls_until_eventually_consistent(monkeypatch) -> None:
     assert result.environment["polling"] is True
 
 
+def test_state_executor_queries_log_and_trace_providers_with_allowlist() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "observability.test"
+        assert request.url.params["traceId"] == "trace-1"
+        return httpx.Response(200, json={"spans": [{"name": "checkout", "status": "OK"}]})
+
+    request = ExecutorRequest.model_validate({"runId": "run-trace", "stepId": "trace", "action": "trace", "allowedHosts": ["observability.test"], "input": {"url": "https://observability.test/traces", "params": {"traceId": "trace-1"}, "assertions": [{"path": "spans.0.status", "operator": "equals", "expected": "OK"}]}})
+    result = state_executor.execute_state(request, http_transport=httpx.MockTransport(handler))
+    assert result.environment["executor"] == "state.trace"
+
+
 def test_mobile_executor_collects_screenshot_and_page_source_with_device_actions(monkeypatch, tmp_path) -> None:
     class Element:
         text = "Order created"

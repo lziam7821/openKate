@@ -4,9 +4,10 @@ import re
 import time
 from typing import Any, Callable, Dict, Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException
 
-from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, evaluate_assertions, redact, render_templates, store_evidence
+from openkate_executor import CONTRACT_VERSION, SDK_VERSION, ExecutorRequest, ExecutorResult, assert_allowed_url, evaluate_assertions, redact, render_templates, store_evidence
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="executor-state", version="0.3.0")
@@ -23,8 +24,21 @@ def secret_value(reference: str) -> str:
     return value
 
 
-def execute_state(request: ExecutorRequest, connection_factory: Optional[Callable[..., Any]] = None, sleep: Callable[[float], None] = time.sleep) -> ExecutorResult:
+def execute_state(request: ExecutorRequest, connection_factory: Optional[Callable[..., Any]] = None, sleep: Callable[[float], None] = time.sleep, http_transport: Optional[httpx.BaseTransport] = None) -> ExecutorResult:
     payload = render_templates(request.input, request.variables)
+    if request.action in {"log", "trace"}:
+        url = str(payload.get("url", ""))
+        assert_allowed_url(url, request.allowed_hosts)
+        with httpx.Client(transport=http_transport, timeout=request.timeout_ms / 1000) as client:
+            response = client.get(url, params=payload.get("params", {}), headers=payload.get("headers", {}))
+        try:
+            actual: Any = response.json()
+        except ValueError:
+            actual = {"text": response.text}
+        assertions = evaluate_assertions(actual, payload.get("assertions", []))
+        if response.is_error or any(not item["passed"] for item in assertions):
+            raise HTTPException(status_code=422, detail=f"{request.action} assertion failed")
+        return ExecutorResult(status="completed", output=actual, inputSummary=redact({"url": url, "params": payload.get("params", {}), "headers": payload.get("headers", {})}), outputSummary=redact(actual), assertions=assertions, evidenceRefs=[store_evidence(request.run_id, request.step_id, request.action, json.dumps(redact(actual)).encode(), "application/json")], environment={"executor": f"state.{request.action}"})
     query = str(payload.get("query", ""))
     if not READ_ONLY_SQL.match(query) or ";" in query.rstrip().rstrip(";"):
         raise HTTPException(status_code=422, detail="state executor only permits one SELECT or WITH query")
@@ -68,7 +82,7 @@ def execute_state(request: ExecutorRequest, connection_factory: Optional[Callabl
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only", "state.eventual-consistency"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
+    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only", "state.eventual-consistency", "state.log", "state.trace"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
 
 
 @app.post("/execute", response_model=ExecutorResult)
