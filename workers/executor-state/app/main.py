@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import asyncio
 from typing import Any, Callable, Dict, Optional
 
 import httpx
@@ -24,8 +25,41 @@ def secret_value(reference: str) -> str:
     return value
 
 
-def execute_state(request: ExecutorRequest, connection_factory: Optional[Callable[..., Any]] = None, sleep: Callable[[float], None] = time.sleep, http_transport: Optional[httpx.BaseTransport] = None, cache_factory: Optional[Callable[[str], Any]] = None) -> ExecutorResult:
+def execute_state(request: ExecutorRequest, connection_factory: Optional[Callable[..., Any]] = None, sleep: Callable[[float], None] = time.sleep, http_transport: Optional[httpx.BaseTransport] = None, cache_factory: Optional[Callable[[str], Any]] = None, message_fetcher: Optional[Callable[[str, str, float], Any]] = None) -> ExecutorResult:
     payload = render_templates(request.input, request.variables)
+    if request.action == "message":
+        subject = str(payload.get("subject", ""))
+        if not subject:
+            raise HTTPException(status_code=422, detail="message subject is required")
+        url = secret_value(str(payload.get("connectionSecretRef", "")))
+        if message_fetcher is None:
+            async def fetch(server: str, topic: str, timeout: float) -> Any:
+                try:
+                    import nats
+                except ImportError as error:
+                    raise HTTPException(status_code=503, detail="NATS executor dependency is unavailable") from error
+                connection = await nats.connect(servers=[server])
+                try:
+                    subscription = await connection.subscribe(topic)
+                    return await subscription.next_msg(timeout=timeout)
+                finally:
+                    await connection.drain()
+
+            message_fetcher = fetch
+        message = message_fetcher(url, subject, request.timeout_ms / 1000)
+        if asyncio.iscoroutine(message):
+            message = asyncio.run(message)
+        body = message.data if hasattr(message, "data") else message
+        if isinstance(body, bytes):
+            try:
+                body = json.loads(body)
+            except ValueError:
+                body = body.decode(errors="replace")
+        actual = {"subject": subject, "body": body}
+        assertions = evaluate_assertions(actual, payload.get("assertions", []))
+        if any(not item["passed"] for item in assertions):
+            raise HTTPException(status_code=422, detail="message assertion failed")
+        return ExecutorResult(status="completed", output=actual, inputSummary=redact({"subject": subject, "connectionSecretRef": payload.get("connectionSecretRef")}), outputSummary=redact(actual), assertions=assertions, evidenceRefs=[store_evidence(request.run_id, request.step_id, "message", json.dumps(redact(actual)).encode(), "application/json")], environment={"executor": "state.nats"})
     if request.action == "cache":
         key = str(payload.get("key", ""))
         if not key:
@@ -101,7 +135,7 @@ def execute_state(request: ExecutorRequest, connection_factory: Optional[Callabl
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only", "state.redis.read_only", "state.eventual-consistency", "state.log", "state.trace"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
+    return {"worker": "executor-state", "status": "ready", "capabilities": ["state.postgresql.read_only", "state.redis.read_only", "state.nats", "state.eventual-consistency", "state.log", "state.trace"], "sdkVersion": SDK_VERSION, "contractVersion": CONTRACT_VERSION}
 
 
 @app.post("/execute", response_model=ExecutorResult)

@@ -275,6 +275,13 @@ def test_state_executor_reads_redis_value_and_ttl(monkeypatch) -> None:
     assert result.environment["executor"] == "state.redis.read_only"
 
 
+def test_state_executor_waits_for_nats_message(monkeypatch) -> None:
+    monkeypatch.setenv("OPENKATE_SECRET_NATS", "nats://nats.test:4222")
+    request = ExecutorRequest.model_validate({"runId": "run-message", "stepId": "paid", "action": "message", "input": {"connectionSecretRef": "nats", "subject": "orders.paid", "assertions": [{"path": "body.orderId", "operator": "equals", "expected": "order-42"}]}})
+    result = state_executor.execute_state(request, message_fetcher=lambda server, subject, timeout: b'{"orderId":"order-42"}')
+    assert result.output["subject"] == "orders.paid"
+
+
 def test_mobile_executor_collects_screenshot_and_page_source_with_device_actions(monkeypatch, tmp_path) -> None:
     class Element:
         text = "Order created"
