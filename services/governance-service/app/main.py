@@ -27,12 +27,14 @@ class ClassificationUpdate(BaseModel):
 class BadCaseCreate(BaseModel):
     evidence_refs: List[str] = Field(alias="evidenceRefs", min_length=1)
     description: str = Field(min_length=1, max_length=4000)
+    project_id: Optional[str] = Field(default=None, alias="projectId", max_length=100)
 
 
 class RuleDraftCreate(BaseModel):
     scope: str = Field(min_length=1, max_length=500)
     expected_effect: str = Field(alias="expectedEffect", min_length=1, max_length=2000)
     risk_level: RiskLevel = Field(default="medium", alias="riskLevel")
+    project_id: Optional[str] = Field(default=None, alias="projectId", max_length=100)
 
 
 class RuleReview(BaseModel):
@@ -80,20 +82,20 @@ class BadCaseStore:
         self.items: Dict[str, Dict] = {}
 
     def create(self, run_id: str, payload: BadCaseCreate, actor: str) -> Dict:
-        item = {"id": f"badcase_{uuid4().hex[:12]}", "runId": run_id, "evidenceRefs": payload.evidence_refs, "description": payload.description, "createdBy": actor, "createdAt": FailureStore.now()}
+        item = {"id": f"badcase_{uuid4().hex[:12]}", "runId": run_id, "projectId": payload.project_id, "evidenceRefs": payload.evidence_refs, "description": payload.description, "createdBy": actor, "createdAt": FailureStore.now()}
         self.items[item["id"]] = item
         if self.database_url:
             with psycopg.connect(self.database_url) as connection:
-                connection.execute("INSERT INTO governance_schema.badcases (id, run_id, evidence_refs, description, created_by, created_at) VALUES (%s, %s, %s, %s, %s, %s)", (item["id"], run_id, Jsonb(payload.evidence_refs), payload.description, actor, item["createdAt"]))
+                connection.execute("INSERT INTO governance_schema.badcases (id, run_id, project_id, evidence_refs, description, created_by, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)", (item["id"], run_id, payload.project_id, Jsonb(payload.evidence_refs), payload.description, actor, item["createdAt"]))
         return deepcopy(item)
 
     def get(self, badcase_id: str) -> Optional[Dict]:
         if badcase_id in self.items or not self.database_url:
             return deepcopy(self.items.get(badcase_id))
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
-            row = connection.execute("SELECT id, run_id, evidence_refs, description, created_by, created_at FROM governance_schema.badcases WHERE id = %s", (badcase_id,)).fetchone()
+            row = connection.execute("SELECT id, run_id, project_id, evidence_refs, description, created_by, created_at FROM governance_schema.badcases WHERE id = %s", (badcase_id,)).fetchone()
         if row:
-            self.items[badcase_id] = {"id": row["id"], "runId": row["run_id"], "evidenceRefs": row["evidence_refs"], "description": row["description"], "createdBy": row["created_by"], "createdAt": row["created_at"].isoformat()}
+            self.items[badcase_id] = {"id": row["id"], "runId": row["run_id"], "projectId": row["project_id"], "evidenceRefs": row["evidence_refs"], "description": row["description"], "createdBy": row["created_by"], "createdAt": row["created_at"].isoformat()}
         return deepcopy(self.items.get(badcase_id))
 
 
@@ -110,7 +112,7 @@ class RuleStore:
         self.items[rule["id"]] = deepcopy(rule)
         if self.database_url:
             with psycopg.connect(self.database_url) as connection:
-                connection.execute("INSERT INTO governance_schema.business_rules (id, badcase_id, status, risk_level, active_version, created_by, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, risk_level = EXCLUDED.risk_level, active_version = EXCLUDED.active_version, updated_at = EXCLUDED.updated_at", (rule["id"], rule["badcaseId"], rule["status"], rule["riskLevel"], rule["activeVersion"], rule["createdBy"], rule["createdAt"], rule["updatedAt"]))
+                connection.execute("INSERT INTO governance_schema.business_rules (id, badcase_id, project_id, status, risk_level, active_version, created_by, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET project_id = EXCLUDED.project_id, status = EXCLUDED.status, risk_level = EXCLUDED.risk_level, active_version = EXCLUDED.active_version, updated_at = EXCLUDED.updated_at", (rule["id"], rule["badcaseId"], rule["projectId"], rule["status"], rule["riskLevel"], rule["activeVersion"], rule["createdBy"], rule["createdAt"], rule["updatedAt"]))
                 for version in rule["versions"]:
                     connection.execute("INSERT INTO governance_schema.rule_versions (rule_id, version, source_badcase_id, scope, expected_effect, content, created_by, created_at, published_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (rule_id, version) DO UPDATE SET published_at = EXCLUDED.published_at", (rule["id"], version["version"], rule["badcaseId"], Jsonb(version["scope"]), version["expectedEffect"], version["content"], version["createdBy"], version["createdAt"], version["publishedAt"]))
                 for approval in rule["approvals"]:
@@ -123,13 +125,13 @@ class RuleStore:
         if rule_id in self.items or not self.database_url:
             return deepcopy(self.items.get(rule_id))
         with psycopg.connect(self.database_url, row_factory=dict_row) as connection:
-            rule = connection.execute("SELECT id, badcase_id, status, risk_level, active_version, created_by, created_at, updated_at FROM governance_schema.business_rules WHERE id = %s", (rule_id,)).fetchone()
+            rule = connection.execute("SELECT id, badcase_id, project_id, status, risk_level, active_version, created_by, created_at, updated_at FROM governance_schema.business_rules WHERE id = %s", (rule_id,)).fetchone()
             if not rule:
                 return None
             versions = connection.execute("SELECT version, scope, expected_effect, content, created_by, created_at, published_at FROM governance_schema.rule_versions WHERE rule_id = %s ORDER BY version", (rule_id,)).fetchall()
             approvals = connection.execute("SELECT id, rule_version, approver, created_at FROM governance_schema.approvals WHERE rule_id = %s ORDER BY created_at", (rule_id,)).fetchall()
             evaluations = connection.execute("SELECT id, rule_version, run_ids, new_hits, false_positives, false_negatives, created_at FROM governance_schema.rule_evaluations WHERE rule_id = %s ORDER BY created_at", (rule_id,)).fetchall()
-        item = {"id": rule["id"], "badcaseId": rule["badcase_id"], "status": rule["status"], "riskLevel": rule["risk_level"], "activeVersion": rule["active_version"], "createdBy": rule["created_by"], "createdAt": rule["created_at"].isoformat(), "updatedAt": rule["updated_at"].isoformat(), "versions": [{"version": row["version"], "scope": row["scope"], "expectedEffect": row["expected_effect"], "content": row["content"], "createdBy": row["created_by"], "createdAt": row["created_at"].isoformat(), "publishedAt": row["published_at"].isoformat() if row["published_at"] else None} for row in versions], "approvals": [{"id": row["id"], "version": row["rule_version"], "actor": row["approver"], "createdAt": row["created_at"].isoformat()} for row in approvals], "evaluations": [{"id": row["id"], "version": row["rule_version"], "runIds": row["run_ids"], "newHits": row["new_hits"], "falsePositives": row["false_positives"], "falseNegatives": row["false_negatives"], "createdAt": row["created_at"].isoformat()} for row in evaluations]}
+        item = {"id": rule["id"], "badcaseId": rule["badcase_id"], "projectId": rule["project_id"], "status": rule["status"], "riskLevel": rule["risk_level"], "activeVersion": rule["active_version"], "createdBy": rule["created_by"], "createdAt": rule["created_at"].isoformat(), "updatedAt": rule["updated_at"].isoformat(), "versions": [{"version": row["version"], "scope": row["scope"], "expectedEffect": row["expected_effect"], "content": row["content"], "createdBy": row["created_by"], "createdAt": row["created_at"].isoformat(), "publishedAt": row["published_at"].isoformat() if row["published_at"] else None} for row in versions], "approvals": [{"id": row["id"], "version": row["rule_version"], "actor": row["approver"], "createdAt": row["created_at"].isoformat()} for row in approvals], "evaluations": [{"id": row["id"], "version": row["rule_version"], "runIds": row["run_ids"], "newHits": row["new_hits"], "falsePositives": row["false_positives"], "falseNegatives": row["false_negatives"], "createdAt": row["created_at"].isoformat()} for row in evaluations]}
         self.items[rule_id] = item
         return deepcopy(item)
 
@@ -139,7 +141,7 @@ class RuleStore:
     def draft(self, badcase: Dict, payload: RuleDraftCreate, actor: str) -> Dict:
         created_at = FailureStore.now()
         version = {"version": 1, "scope": {"description": payload.scope}, "expectedEffect": payload.expected_effect, "content": f"When {badcase['description']}, verify the correction before release.", "createdBy": actor, "createdAt": created_at, "publishedAt": None}
-        return self.save({"id": f"rule_{uuid4().hex[:12]}", "badcaseId": badcase["id"], "status": "draft", "riskLevel": payload.risk_level, "activeVersion": None, "createdBy": actor, "createdAt": created_at, "updatedAt": created_at, "versions": [version], "approvals": [], "evaluations": []})
+        return self.save({"id": f"rule_{uuid4().hex[:12]}", "badcaseId": badcase["id"], "projectId": payload.project_id or badcase.get("projectId"), "status": "draft", "riskLevel": payload.risk_level, "activeVersion": None, "createdBy": actor, "createdAt": created_at, "updatedAt": created_at, "versions": [version], "approvals": [], "evaluations": []})
 
 
 store = FailureStore(os.getenv("OPENKATE_GOVERNANCE_DATABASE_URL"))
@@ -206,6 +208,16 @@ async def create_rule_draft(badcase_id: str, payload: RuleDraftCreate, actor: st
 @app.get("/internal/v1/rules/{rule_id}")
 async def rule_detail(rule_id: str) -> Dict:
     return RuleStore.public(get_rule(rule_id))
+
+
+@app.get("/internal/v1/projects/{project_id}/rules/published")
+async def published_rules(project_id: str) -> Dict:
+    rules = [rule for rule in rule_store.items.values() if rule["projectId"] == project_id and rule["status"] == "published"]
+    if rule_store.database_url:
+        with psycopg.connect(rule_store.database_url, row_factory=dict_row) as connection:
+            rows = connection.execute("SELECT id FROM governance_schema.business_rules WHERE project_id = %s AND status = 'published'", (project_id,)).fetchall()
+        rules = [get_rule(row["id"]) for row in rows]
+    return {"items": [{"id": rule["id"], "activeVersion": rule["activeVersion"], "content": next(version["content"] for version in rule["versions"] if version["version"] == rule["activeVersion"])} for rule in rules]}
 
 
 @app.post("/internal/v1/rules/{rule_id}/review")

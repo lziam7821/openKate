@@ -45,4 +45,24 @@ def test_knowledge_lookup_is_project_scoped_and_snapshot_is_stable() -> None:
     agent_service.knowledge["project-a"] = [{"id": "knowledge-a", "projectId": "project-a", "title": "Payment timeout", "content": "Retry payment callback", "source": "incident-1"}]
     agent_service.knowledge["project-b"] = [{"id": "knowledge-b", "projectId": "project-b", "title": "Payment timeout", "content": "Other tenant", "source": "incident-2"}]
     result = asyncio.run(agent_service.list_knowledge("project-a", "payment callback"))
-    assert result["snapshot"] == {"projectId": "project-a", "ids": ["knowledge-a"]}
+    repeated = asyncio.run(agent_service.list_knowledge("project-a", "payment callback"))
+    assert result["snapshot"]["projectId"] == "project-a"
+    assert result["snapshot"]["ids"] == ["knowledge-a"]
+    assert result["snapshot"]["id"] == repeated["snapshot"]["id"]
+
+
+def test_generation_injects_project_knowledge_snapshot_and_published_rules(monkeypatch) -> None:
+    async def assets(_: list[str]):
+        return [{"parse": {"text": "# Payment\nRetry callback", "citations": [{"source": "asset", "line": 1}]}}]
+
+    async def rules(_: str):
+        return [{"id": "rule-payment", "activeVersion": 1, "content": "Verify callback retries."}]
+
+    agent_service.tasks.clear()
+    agent_service.knowledge.clear()
+    agent_service.knowledge["project-a"] = [{"id": "knowledge-a", "projectId": "project-a", "title": "Payment retry", "content": "Retry callback after timeout", "source": "incident-1"}]
+    monkeypatch.setattr(agent_service, "parsed_assets", assets)
+    monkeypatch.setattr(agent_service, "published_rules", rules)
+    task = asyncio.run(agent_service.create_generation("project-a", agent_service.GenerationCreate(assetIds=["asset-1"])))
+    assert task["draft"]["knowledgeSnapshot"]["ids"] == ["knowledge-a"]
+    assert task["draft"]["ruleRefs"] == [{"id": "rule-payment", "activeVersion": 1, "content": "Verify callback retries."}]

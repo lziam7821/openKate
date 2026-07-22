@@ -1,17 +1,24 @@
 import os
+import hashlib
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 import httpx
+import psycopg
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from openkate_common.service_app import instrument_app
 
 app = FastAPI(title="agent-service", version="0.5.0")
 instrument_app(app, "agent-service", ["scenario-generation"])
 ASSET_SERVICE_URL = os.getenv("OPENKATE_ASSET_SERVICE_URL", "http://127.0.0.1:8006")
 VALIDATION_SERVICE_URL = os.getenv("OPENKATE_VALIDATION_SERVICE_URL", "http://127.0.0.1:8002")
+GOVERNANCE_SERVICE_URL = os.getenv("OPENKATE_GOVERNANCE_SERVICE_URL", "http://127.0.0.1:8008")
+DATABASE_URL = os.getenv("OPENKATE_AGENT_DATABASE_URL")
 tasks: Dict[str, Dict[str, Any]] = {}
 knowledge: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -29,19 +36,62 @@ class KnowledgeImport(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     content: str = Field(min_length=1, max_length=10000)
     source: str = Field(min_length=1, max_length=500)
+    category: Literal["historical_defect", "historical_case"] = "historical_case"
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def draft_from_assets(project_id: str, assets: List[Dict[str, Any]]) -> Dict[str, Any]:
+def token_vector(value: str) -> List[str]:
+    return sorted(set(re.findall(r"[a-z0-9_]+", value.lower())))
+
+
+def snapshot(project_id: str, query: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    ids = [item["id"] for item in items]
+    digest = hashlib.sha256(f"{project_id}\n{query.lower()}\n{'|'.join(ids)}".encode()).hexdigest()[:16]
+    return {"id": f"snapshot_{digest}", "projectId": project_id, "ids": ids}
+
+
+def related_knowledge(project_id: str, query: str) -> List[Dict[str, Any]]:
+    terms = token_vector(query)
+    candidates = knowledge.get(project_id, [])
+    ranked = [(sum(term in f"{item['title']} {item['content']}".lower() for term in terms), item) for item in candidates]
+    return [{**item, "score": score} for score, item in sorted(ranked, key=lambda value: (-value[0], value[1]["id"])) if score][:5]
+
+
+def persist_knowledge(item: Dict[str, Any], vector: List[str]) -> None:
+    if not DATABASE_URL:
+        return
+    with psycopg.connect(DATABASE_URL) as connection:
+        connection.execute("INSERT INTO agent_schema.knowledge_items (id, project_id, title, content, source, category, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)", (item["id"], item["projectId"], item["title"], item["content"], item["source"], item["category"], item["createdAt"]))
+        connection.execute("INSERT INTO agent_schema.knowledge_embeddings (knowledge_id, vector) VALUES (%s, %s)", (item["id"], Jsonb(vector)))
+
+
+def load_knowledge(project_id: str) -> List[Dict[str, Any]]:
+    if not DATABASE_URL:
+        return knowledge.get(project_id, [])
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row) as connection:
+        rows = connection.execute("SELECT id, project_id, title, content, source, category, created_at FROM agent_schema.knowledge_items WHERE project_id = %s ORDER BY id", (project_id,)).fetchall()
+    items = [{"id": row["id"], "projectId": row["project_id"], "title": row["title"], "content": row["content"], "source": row["source"], "category": row["category"], "createdAt": row["created_at"].isoformat()} for row in rows]
+    knowledge[project_id] = items
+    return items
+
+
+def persist_snapshot(value: Dict[str, Any], query: str) -> None:
+    if not DATABASE_URL:
+        return
+    with psycopg.connect(DATABASE_URL) as connection:
+        connection.execute("INSERT INTO agent_schema.knowledge_snapshots (id, project_id, query, knowledge_ids) VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING", (value["id"], value["projectId"], query, Jsonb(value["ids"])))
+
+
+def draft_from_assets(project_id: str, assets: List[Dict[str, Any]], knowledge_snapshot: Optional[Dict[str, Any]] = None, rules: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     citations = [citation for asset in assets for citation in asset.get("parse", {}).get("citations", [])]
     texts = [asset.get("parse", {}).get("text", "") for asset in assets]
     lines = [line.strip().lstrip("#").strip() for text in texts for line in text.splitlines() if line.strip()]
     title = lines[0] if lines else "Generated validation scenario"
     goal = lines[1] if len(lines) > 1 else title
-    return {"title": title[:200], "businessGoal": goal[:2000], "actors": ["qa"], "preconditions": [], "riskLevel": "medium", "invariants": [], "risks": [{"title": "Source coverage", "description": "Confirm all source requirements are covered.", "level": "medium"}], "evidencePoints": [], "tags": ["ai-draft"], "projectId": project_id, "citations": citations or [{"source": "inferred", "kind": "inferred"}], "quality": 0.8 if citations else 0.5}
+    return {"title": title[:200], "businessGoal": goal[:2000], "actors": ["qa"], "preconditions": [], "riskLevel": "medium", "invariants": [], "risks": [{"title": "Source coverage", "description": "Confirm all source requirements are covered.", "level": "medium"}], "evidencePoints": [], "tags": ["ai-draft"], "projectId": project_id, "citations": citations or [{"source": "inferred", "kind": "inferred"}], "quality": 0.8 if citations else 0.5, "knowledgeSnapshot": knowledge_snapshot, "ruleRefs": rules or []}
 
 
 async def parsed_assets(asset_ids: List[str]) -> List[Dict[str, Any]]:
@@ -59,6 +109,15 @@ async def parsed_assets(asset_ids: List[str]) -> List[Dict[str, Any]]:
     return assets
 
 
+async def published_rules(project_id: str) -> List[Dict[str, Any]]:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(f"{GOVERNANCE_SERVICE_URL}/internal/v1/projects/{project_id}/rules/published")
+        return response.json()["items"] if response.is_success else []
+    except httpx.HTTPError:
+        return []
+
+
 def event(task: Dict[str, Any], event_type: str, payload: Dict[str, Any]) -> None:
     task["events"].append({"eventId": str(uuid4()), "eventType": event_type, "occurredAt": now(), "payload": payload})
 
@@ -72,22 +131,32 @@ async def health() -> Dict[str, str]:
 async def import_knowledge(project_id: str, payload: KnowledgeImport) -> Dict[str, Any]:
     item = {"id": f"knowledge_{uuid4().hex[:12]}", "projectId": project_id, **payload.model_dump(), "createdAt": now()}
     knowledge.setdefault(project_id, []).append(item)
+    persist_knowledge(item, token_vector(f"{payload.title} {payload.content}"))
     return item
 
 
 @app.get("/internal/v1/projects/{project_id}/knowledge")
 async def list_knowledge(project_id: str, q: str = "") -> Dict[str, Any]:
-    terms = [term.lower() for term in q.split()]
-    items = [item for item in knowledge.get(project_id, []) if all(term in f"{item['title']} {item['content']}".lower() for term in terms)]
-    return {"items": items, "snapshot": {"projectId": project_id, "ids": [item["id"] for item in items]}}
+    load_knowledge(project_id)
+    items = related_knowledge(project_id, q) if q else knowledge.get(project_id, [])
+    value = snapshot(project_id, q, items)
+    persist_snapshot(value, q)
+    return {"items": items, "snapshot": value}
 
 
 @app.post("/internal/v1/projects/{project_id}/scenario-generations", status_code=202)
 async def create_generation(project_id: str, payload: GenerationCreate) -> Dict[str, Any]:
     assets = await parsed_assets(payload.asset_ids)
+    query = "\n".join(asset.get("parse", {}).get("text", "") for asset in assets)
+    load_knowledge(project_id)
+    retrieved = related_knowledge(project_id, query)
+    knowledge_snapshot = snapshot(project_id, query, retrieved)
+    persist_snapshot(knowledge_snapshot, query)
+    rules = await published_rules(project_id)
     task_id = f"generation_{uuid4().hex[:12]}"
-    task = {"id": task_id, "projectId": project_id, "assetIds": payload.asset_ids, "status": "needs_review", "createdAt": now(), "updatedAt": now(), "events": [], "draft": draft_from_assets(project_id, assets), "review": None, "model": "source-grounded-rule-based", "cost": {"inputTokens": 0, "outputTokens": 0, "latencyMs": 0}}
+    task = {"id": task_id, "projectId": project_id, "assetIds": payload.asset_ids, "status": "needs_review", "createdAt": now(), "updatedAt": now(), "events": [], "draft": draft_from_assets(project_id, assets, knowledge_snapshot, rules), "review": None, "model": "source-grounded-rule-based", "cost": {"inputTokens": 0, "outputTokens": 0, "latencyMs": 0}}
     event(task, "agent.generation.requested.v1", {"assetIds": payload.asset_ids})
+    event(task, "knowledge.snapshot.created.v1", knowledge_snapshot)
     event(task, "agent.stage.completed.v1", {"stage": "scenario_planner", "quality": task["draft"]["quality"]})
     event(task, "agent.review.required.v1", {})
     tasks[task_id] = task

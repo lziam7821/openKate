@@ -38,7 +38,7 @@ def test_high_risk_rule_requires_replay_two_approvals_and_can_rollback() -> None
     governance_service.badcase_store.items.clear()
     governance_service.rule_store.items.clear()
     badcase = client.post("/internal/v1/runs/run-payment/badcases", headers={"X-OpenKATE-Actor": "qa-ada"}, json={"evidenceRefs": ["asset://trace-1"], "description": "退款金额未校验"}).json()
-    draft = client.post(f"/internal/v1/badcases/{badcase['id']}/rule-drafts", headers={"X-OpenKATE-Actor": "qa-ada", "X-OpenKATE-Role": "developer"}, json={"scope": "payment refunds", "expectedEffect": "block invalid refund totals", "riskLevel": "high"})
+    draft = client.post(f"/internal/v1/badcases/{badcase['id']}/rule-drafts", headers={"X-OpenKATE-Actor": "qa-ada", "X-OpenKATE-Role": "developer"}, json={"scope": "payment refunds", "expectedEffect": "block invalid refund totals", "riskLevel": "high", "projectId": "project-payment"})
     assert draft.status_code == 201
     rule_id = draft.json()["id"]
     assert client.post(f"/internal/v1/rules/{rule_id}/review", headers={"X-OpenKATE-Role": "reviewer"}, json={}).json()["status"] == "in_review"
@@ -49,6 +49,7 @@ def test_high_risk_rule_requires_replay_two_approvals_and_can_rollback() -> None
     assert replay.json()["runIds"] == ["run-a", "run-b"]
     published = client.post(f"/internal/v1/rules/{rule_id}/publish", headers={"X-OpenKATE-Role": "maintainer"})
     assert published.json()["activeVersion"] == 1
+    assert client.get("/internal/v1/projects/project-payment/rules/published").json()["items"][0]["id"] == rule_id
     assert client.get(f"/internal/v1/rules/{rule_id}/metrics").json()["hitRate"] == 1
     assert client.post(f"/internal/v1/rules/{rule_id}/rollback", headers={"X-OpenKATE-Role": "maintainer"}).json()["activeVersion"] is None
 

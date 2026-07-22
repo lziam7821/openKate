@@ -130,7 +130,10 @@ services:
   agent-service:
     build: {context: ., dockerfile: deploy/docker/python-service.Dockerfile, args: {SERVICE_PATH: services/agent-service}}
     profiles: [ai]
-    environment: {PYTHONPATH: /app/packages/python:/app/services/agent-service}
+    environment:
+      PYTHONPATH: /app/packages/python:/app/services/agent-service
+      OPENKATE_AGENT_DATABASE_URL: postgresql://agent_runtime:change-me@postgres:5432/openkate
+      OPENKATE_GOVERNANCE_SERVICE_URL: http://governance-service:8008
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8007"]
     expose: ["8007"]
 
